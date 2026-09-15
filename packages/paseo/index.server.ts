@@ -4,10 +4,6 @@ import * as fs from "fs";
 import * as path from "path";
 import * as http from "http";
 
-const WORKSPACE_ROOT =
-  process.env.PASEO_WORKSPACE ||
-  "/Users/jermy/Desktop/shuijing/14.paseo纯对话";
-
 const ANNOTATE_HTTP_PORT = 29789;
 
 /**
@@ -23,7 +19,7 @@ function getAllWorkspaceRoots(): string[] {
   const homeDir = process.env.HOME || "/Users/jermy";
   const paseoDir = path.join(homeDir, ".paseo");
 
-  // Read all projects
+  // Read all projects from Paseo
   const projectsJson = path.join(paseoDir, "projects", "projects.json");
   if (fs.existsSync(projectsJson)) {
     try {
@@ -38,7 +34,7 @@ function getAllWorkspaceRoots(): string[] {
     } catch {}
   }
 
-  // Read all workspaces
+  // Read all workspaces from Paseo
   const workspacesJson = path.join(paseoDir, "projects", "workspaces.json");
   if (fs.existsSync(workspacesJson)) {
     try {
@@ -53,9 +49,13 @@ function getAllWorkspaceRoots(): string[] {
     } catch {}
   }
 
-  roots.add(path.join(homeDir, "Desktop"));
   roots.add(path.join(homeDir, "Desktop", "shuijing"));
+  roots.add(path.join(homeDir, "Desktop", "03_公司主体与合同"));
   return Array.from(roots);
+}
+
+function escapeRegExp(str: string) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -68,7 +68,7 @@ function findMarkdownFileWithText(textToFind: string, fileHint?: string): string
   const roots = getAllWorkspaceRoots();
   const visitedDirs = new Set<string>();
 
-  function collectMdFiles(dir: string, depth = 0, maxDepth = 4): string[] {
+  function collectMdFiles(dir: string, depth = 0, maxDepth = 6): string[] {
     if (depth > maxDepth || visitedDirs.has(dir)) return [];
     visitedDirs.add(dir);
 
@@ -100,7 +100,8 @@ function findMarkdownFileWithText(textToFind: string, fileHint?: string): string
   if (hint) {
     for (const file of allFiles) {
       if (path.basename(file) === "demo-review.md") continue;
-      if (path.basename(file).includes(hint) || hint.includes(path.basename(file).replace(/\.md$/, ""))) {
+      const bname = path.basename(file);
+      if (bname.includes(hint) || hint.includes(bname.replace(/\.md$/, ""))) {
         try {
           if (fs.readFileSync(file, "utf-8").includes(cleanText)) {
             return file;
@@ -167,7 +168,7 @@ function processAnnotation(input: {
       }
       fs.writeFileSync(targetFile, updatedContent, "utf-8");
       console.log(`[quote-selection server] Reverted annotation in: ${targetFile}`);
-      return { success: true, savedPath: path.basename(targetFile), error: null };
+      return { success: true, savedPath: path.basename(targetFile), fullPath: targetFile, error: null };
     }
 
     if (action === "edit" && input.newComment) {
@@ -178,7 +179,7 @@ function processAnnotation(input: {
       }
       fs.writeFileSync(targetFile, updatedContent, "utf-8");
       console.log(`[quote-selection server] Edited annotation in: ${targetFile}`);
-      return { success: true, savedPath: path.basename(targetFile), error: null };
+      return { success: true, savedPath: path.basename(targetFile), fullPath: targetFile, error: null };
     }
 
     // Default: Add annotation
@@ -209,21 +210,14 @@ function processAnnotation(input: {
   }
 }
 
-function escapeRegExp(str: string) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 export default function contribute(server: PluginServerContext) {
-  // 1. Register Paseo native RPC
   server.handle(annotateDocumentRpc, async (input) => {
     return processAnnotation(input);
   });
 
-  // 2. Start lightweight local HTTP bridge for bulletproof zero-delay IPC from webview
   let httpServer: http.Server | null = null;
   try {
     httpServer = http.createServer((req: any, res: any) => {
-      // CORS headers
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -259,7 +253,7 @@ export default function contribute(server: PluginServerContext) {
       console.log(`[quote-selection server] Local HTTP bridge listening on 127.0.0.1:${ANNOTATE_HTTP_PORT}`);
     });
   } catch (e) {
-    console.warn("[quote-selection server] Could not bind HTTP port, relying on native RPC:", e);
+    console.warn("[quote-selection server] Could not bind HTTP port:", e);
   }
 
   return () => {
