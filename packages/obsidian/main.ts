@@ -2,20 +2,16 @@ import {
   App,
   Notice,
   Plugin,
-  Editor,
-  EditorPosition,
-  MarkdownView,
   TFile,
 } from "obsidian";
 import {
-  ViewPlugin,
-  ViewUpdate,
   EditorView,
-  MatchDecorator,
   Decoration,
   WidgetType,
 } from "@codemirror/view";
-import { Extension } from "@codemirror/state";
+import { Extension, StateField } from "@codemirror/state";
+import { captureAddition, hasMarkers, markupPattern, replaceTarget, resolveActiveContext, targetForWidget, type Target } from "./document-target";
+import { renderReadingAnnotations } from "./reading-renderer";
 
 interface CriticMarkupSettings {
   foldEnabled: boolean;
@@ -34,10 +30,6 @@ function escapeHtml(str: string): string {
     .replace(/'/g, "&#039;");
 }
 
-function escapeRegExp(str: string): string {
-  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 let activePluginInstance: CriticMarkupPlugin | null = null;
 let lastActionTimestamp = 0;
 
@@ -47,35 +39,6 @@ function isMobileDevice(): boolean {
     "ontouchstart" in window ||
     navigator.maxTouchPoints > 0
   );
-}
-
-// 4-tier context resolver across Desktop & Mobile
-function resolveActiveContext(app: App) {
-  let view = app.workspace.getActiveViewOfType(MarkdownView);
-
-  if (!view && (app.workspace as any).activeLeaf?.view instanceof MarkdownView) {
-    view = (app.workspace as any).activeLeaf.view as MarkdownView;
-  }
-
-  if (!view) {
-    const leaves = app.workspace.getLeavesOfType("markdown");
-    if (leaves && leaves.length > 0 && leaves[0].view instanceof MarkdownView) {
-      view = leaves[0].view as MarkdownView;
-    }
-  }
-
-  let file = view?.file || app.workspace.getActiveFile();
-  if (!file) {
-    const leaves = app.workspace.getLeavesOfType("markdown");
-    for (const leaf of leaves) {
-      if ((leaf.view as any)?.file) {
-        file = (leaf.view as any).file;
-        break;
-      }
-    }
-  }
-
-  return { view, file, editor: view?.editor };
 }
 
 // Anti-ghost-click runner for mobile touch
@@ -99,7 +62,7 @@ function closeAllCriticModals() {
 function openAddAnnotationModal(
   app: App,
   selectedText: string,
-  savedRange?: { from: EditorPosition; to: EditorPosition }
+  target: Target
 ) {
   closeAllCriticModals();
 
@@ -213,108 +176,25 @@ function openAddAnnotationModal(
     cursor: pointer;
   `;
 
+  let saving = false;
   const doSubmit = async () => {
+    if (saving) return;
     const comment = textarea.value.trim();
     if (!comment) {
       new Notice("请输入批注内容");
       return;
     }
 
-    const cleanOrig = selectedText.trim();
-    const critic = `{==${cleanOrig}==}{>>${comment}<<}`;
-    const ctx = resolveActiveContext(app);
-
-    // Immediate DOM highlight injection for zero-latency feedback on mobile
+    if (hasMarkers(selectedText + comment)) { new Notice("不支持嵌套批注或 CriticMarkup 分隔符"); return; }
+    saving = true; submitBtn.disabled = true;
     try {
-      const domSel = window.getSelection();
-      if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-        const range = domSel.getRangeAt(0);
-        const spanWrapper = document.createElement("span");
-        spanWrapper.className = "cm-critic-wrapper";
-        spanWrapper.innerHTML = `<span class="cm-critic-highlight">${escapeHtml(cleanOrig)}</span><span class="cm-critic-badge" data-orig="${encodeURIComponent(cleanOrig)}" data-comm="${encodeURIComponent(comment)}">💬 <span>${escapeHtml(comment)}</span></span>`;
-        range.deleteContents();
-        range.insertNode(spanWrapper);
-        domSel.removeAllRanges();
-
-        // Bind click/touch on the newly injected badge immediately
-        const badge = spanWrapper.querySelector(".cm-critic-badge");
-        if (badge) {
-          const handleBadgeAction = (e: Event) => {
-            e.stopPropagation();
-            e.preventDefault();
-            safeRunAction(() => {
-              openAnnotationManageModal(app, cleanOrig, comment);
-            });
-          };
-          badge.addEventListener("click", handleBadgeAction);
-          badge.addEventListener("touchend", handleBadgeAction);
-        }
-      }
-    } catch (e) {
-      console.debug("CriticFlow immediate DOM injection fallback:", e);
-    }
-
-    // Persist to underlying document
-    if (ctx.view && ctx.view.getMode() === "source" && ctx.editor) {
-      const editor = ctx.editor;
-      if (savedRange) {
-        editor.replaceRange(critic, savedRange.from, savedRange.to);
-      } else {
-        const docVal = editor.getValue();
-        const idx = docVal.indexOf(cleanOrig);
-        if (idx !== -1) {
-          const fromPos = editor.offsetToPos(idx);
-          const toPos = editor.offsetToPos(idx + cleanOrig.length);
-          editor.replaceRange(critic, fromPos, toPos);
-        } else {
-          editor.replaceSelection(critic);
-        }
-      }
-
-      // Blur to exit Live Preview active-line unfolding so highlight is immediately rendered!
-      try {
-        (editor as any).blur?.();
-      } catch {}
-
-      new Notice("✅ 已插入划词批注！");
-    } else if (ctx.file) {
-      // Reading View underlying file update
-      try {
-        const file = ctx.file;
-        const oldContent = await app.vault.read(file);
-        const safeOrig = escapeRegExp(cleanOrig);
-        let pattern = new RegExp(safeOrig);
-
-        if (!pattern.test(oldContent)) {
-          const words = cleanOrig.split(/\s+/).map(escapeRegExp).join("\\s+");
-          pattern = new RegExp(words);
-        }
-
-        if (pattern.test(oldContent)) {
-          const newContent = oldContent.replace(pattern, critic);
-          await app.vault.modify(file, newContent);
-          new Notice("✅ 已在文件中插入批注！");
-
-          // Force view refresh across mobile/desktop
-          setTimeout(() => {
-            if (ctx.view) {
-              if ((ctx.view as any).leaf?.rebuildView) {
-                (ctx.view as any).leaf.rebuildView();
-              } else if ((ctx.view as any).previewMode?.rerender) {
-                (ctx.view as any).previewMode.rerender(true);
-              }
-            }
-          }, 100);
-        } else {
-          new Notice("⚠️ 未能在原文中定位选区");
-        }
-      } catch (err) {
-        new Notice("❌ 批注写入失败：" + String(err));
-      }
-    }
-
-    overlay.remove();
-    activePluginInstance?.resetSelectionState();
+      const result = await replaceTarget(app, target, selectedText, `{==${selectedText}==}{>>${comment}<<}`);
+      new Notice(result === "file" ? "✅ 已保存到原文件" : "✅ 已写入原编辑器，由 Obsidian 自动保存");
+      overlay.remove();
+      activePluginInstance?.resetSelectionState();
+    } catch (err) {
+      new Notice("❌ 未保存：" + String(err));
+    } finally { saving = false; submitBtn.disabled = false; }
   };
 
   submitBtn.onclick = () => safeRunAction(doSubmit);
@@ -333,9 +213,9 @@ function openAddAnnotationModal(
   });
 
   textarea.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    if (!e.isComposing && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      doSubmit();
+      void doSubmit();
     }
     if (e.key === "Escape") {
       overlay.remove();
@@ -354,7 +234,7 @@ function openAnnotationManageModal(
   app: App,
   originalText: string,
   comment: string,
-  editorView?: EditorView
+  target: Target
 ) {
   closeAllCriticModals();
 
@@ -481,72 +361,19 @@ function openAnnotationManageModal(
     cursor: pointer;
   `;
 
+  let saving = false;
   const updateDoc = async (newCommentOrNull: string | null) => {
-    const cleanOrig = originalText.trim();
-    const cleanComm = comment.trim();
-
-    if (editorView) {
-      const fullDoc = editorView.state.doc.toString();
-      const safeOrig = escapeRegExp(cleanOrig);
-      const safeOldComm = escapeRegExp(cleanComm);
-
-      let pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>\\s*${safeOldComm}\\s*<<\\}`, "g");
-      let match = pattern.exec(fullDoc);
-
-      if (!match) {
-        pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`, "g");
-        match = pattern.exec(fullDoc);
-      }
-
-      if (!match) {
-        const words = cleanOrig.split(/\s+/).map(escapeRegExp).join("\\s+");
-        pattern = new RegExp(`\\{==\\s*${words}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`, "g");
-        match = pattern.exec(fullDoc);
-      }
-
-      if (match) {
-        const from = match.index;
-        const to = from + match[0].length;
-        const replacement = newCommentOrNull === null ? cleanOrig : `{==${cleanOrig}==}{>>${newCommentOrNull.trim()}<<}`;
-        editorView.dispatch({ changes: { from, to, insert: replacement } });
-      }
-    } else {
-      const ctx = resolveActiveContext(app);
-      if (ctx.file) {
-        try {
-          const file = ctx.file;
-          const fullDoc = await app.vault.read(file);
-          const safeOrig = escapeRegExp(cleanOrig);
-          const safeOldComm = escapeRegExp(cleanComm);
-
-          let pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>\\s*${safeOldComm}\\s*<<\\}`);
-          if (!pattern.test(fullDoc)) {
-            pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`);
-          }
-          if (!pattern.test(fullDoc)) {
-            const words = cleanOrig.split(/\s+/).map(escapeRegExp).join("\\s+");
-            pattern = new RegExp(`\\{==\\s*${words}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`);
-          }
-
-          if (pattern.test(fullDoc)) {
-            const replacement = newCommentOrNull === null ? cleanOrig : `{==${cleanOrig}==}{>>${newCommentOrNull.trim()}<<}`;
-            await app.vault.modify(file, fullDoc.replace(pattern, replacement));
-            if (ctx.view) {
-              if ((ctx.view as any).leaf?.rebuildView) {
-                (ctx.view as any).leaf.rebuildView();
-              } else if ((ctx.view as any).previewMode?.rerender) {
-                (ctx.view as any).previewMode.rerender(true);
-              }
-            }
-          }
-        } catch (err) {
-          console.error("CriticFlow update file error:", err);
-        }
-      }
-    }
-
-    overlay.remove();
-    new Notice(newCommentOrNull === null ? "✅ 已删除批注并还原原文！" : "✅ 批注已修改并保存！");
+    if (saving) return;
+    if (newCommentOrNull !== null && hasMarkers(newCommentOrNull)) { new Notice("批注内容不能含 CriticMarkup 分隔符"); return; }
+    saving = true; saveBtn.disabled = deleteBtn.disabled = true;
+    try {
+      const expected = `{==${originalText}==}{>>${comment}<<}`;
+      const replacement = newCommentOrNull === null ? originalText : `{==${originalText}==}{>>${newCommentOrNull.trim()}<<}`;
+      const result = await replaceTarget(app, target, expected, replacement);
+      overlay.remove();
+      new Notice(result === "file" ? "✅ 已保存到原文件" : "✅ 已更新原编辑器，由 Obsidian 自动保存");
+    } catch (err) { new Notice("❌ 未保存：" + String(err)); }
+    finally { saving = false; saveBtn.disabled = deleteBtn.disabled = false; }
   };
 
   deleteBtn.onclick = () => safeRunAction(() => updateDoc(null));
@@ -574,7 +401,7 @@ function openAnnotationManageModal(
   });
 
   textarea.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    if (!e.isComposing && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       saveBtn.click();
     }
@@ -602,7 +429,7 @@ class CriticBadgeWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const badge = document.createElement("span");
     badge.className = "cm-critic-badge";
-    badge.innerHTML = `💬 <span>${escapeHtml(this.comment)}</span>`;
+    badge.innerHTML = `💬 <span>${escapeHtml(this.comment.length > 36 || this.comment.includes("\n") ? "查看批注" : this.comment)}</span>`;
     badge.title = `批注：${this.comment} (点击查看或删除)`;
 
     const handleOpen = (e: Event) => {
@@ -610,12 +437,10 @@ class CriticBadgeWidget extends WidgetType {
       e.preventDefault();
       if (activePluginInstance) {
         safeRunAction(() => {
-          openAnnotationManageModal(
-            activePluginInstance!.app,
-            this.original,
-            this.comment,
-            view
-          );
+          const app = activePluginInstance!.app;
+          const target = targetForWidget(app, view, badge);
+          if (!target) { new Notice("无法定位当前批注，未修改"); return; }
+          openAnnotationManageModal(app, this.original, this.comment, target);
         });
       }
     };
@@ -638,7 +463,7 @@ export default class CriticMarkupPlugin extends Plugin {
   settings: CriticMarkupSettings = DEFAULT_SETTINGS;
   private floatingBtn: HTMLElement | null = null;
   private activeSelectedText = "";
-  private savedEditorRange: { from: EditorPosition; to: EditorPosition } | null = null;
+  private savedAddition: ReturnType<typeof captureAddition> = null;
   private updatePending = false;
 
   async onload() {
@@ -660,100 +485,51 @@ export default class CriticMarkupPlugin extends Plugin {
 
   resetSelectionState() {
     this.activeSelectedText = "";
-    this.savedEditorRange = null;
+    this.savedAddition = null;
     if (this.floatingBtn) {
       this.floatingBtn.style.display = "none";
     }
   }
 
   private buildEditorExtension(): Extension {
-    // Robust single-line critic matcher without range overlapping collisions
-    const criticMatcher = new MatchDecorator({
-      regexp: /\{==([^=\n]+?)==\}\{>>([^>\n]+?)<<\}/g,
-      decorate: (add, from, to, match) => {
-        if (!this.settings.foldEnabled) return;
-        const orig = match[1];
-        const comm = match[2];
-        const origStart = from + 3;
-        const origEnd = origStart + orig.length;
-
-        add(from, origStart, Decoration.replace({}));
-        add(origStart, origEnd, Decoration.mark({ class: "cm-critic-highlight" }));
-        add(
-          origEnd,
-          to,
-          Decoration.replace({
-            widget: new CriticBadgeWidget(orig, comm),
-          })
-        );
-      },
-    });
-
-    return ViewPlugin.define(
-      (view) => ({
-        decorations: criticMatcher.createDeco(view),
-        update(u: ViewUpdate) {
-          this.decorations = activePluginInstance?.settings.foldEnabled
-            ? criticMatcher.updateDeco(u, this.decorations)
-            : Decoration.none;
-        },
-      }),
-      {
-        decorations: (v) => v.decorations,
+    const decorate = (text: string) => {
+      if (!this.settings.foldEnabled) return Decoration.none;
+      const ranges = [];
+      for (const match of text.matchAll(markupPattern())) {
+        const from = match.index!, origEnd = from + 3 + match[1].length;
+        ranges.push(Decoration.replace({}).range(from, from + 3));
+        if (origEnd > from + 3) ranges.push(Decoration.mark({ class: "cm-critic-highlight" }).range(from + 3, origEnd));
+        ranges.push(Decoration.replace({ widget: new CriticBadgeWidget(match[1], match[2]) }).range(origEnd, from + match[0].length));
       }
-    );
+      return Decoration.set(ranges, true);
+    };
+    // Direct StateField decorations may span line breaks; viewport MatchDecorator cannot.
+    return StateField.define({
+      create: state => decorate(state.doc.toString()),
+      update: (value, transaction) => transaction.docChanged || transaction.reconfigured
+        ? decorate(transaction.state.doc.toString()) : value,
+      provide: field => EditorView.decorations.from(field),
+    });
   }
 
   private registerReadingViewProcessor() {
-    this.registerMarkdownPostProcessor((element: HTMLElement) => {
+    this.registerMarkdownPostProcessor(async (element, context) => {
       if (!this.settings.foldEnabled) return;
-
-      const blocks = element.querySelectorAll("p, li, h1, h2, h3, h4, h5, h6, blockquote, div.markdown-preview-section");
-      const targets: Element[] = blocks.length > 0 ? Array.from(blocks) : [element];
-
-      for (const block of targets) {
-        let html = block.innerHTML;
-        if (!html.includes("{") || (!html.includes(">>") && !html.includes("&gt;&gt;"))) {
-          continue;
+      const file = this.app.vault.getAbstractFileByPath(context.sourcePath);
+      if (!(file instanceof TFile)) return;
+      try {
+        const section = context.getSectionInfo(element);
+        const snapshot = await this.app.vault.read(file);
+        if (activePluginInstance !== this || !this.settings.foldEnabled) return;
+        let bounds = null;
+        if (section) {
+          const lines = snapshot.split("\n");
+          const offset = (line: number) => lines.slice(0, line).reduce((sum, s) => sum + s.length + 1, 0);
+          bounds = { from: offset(section.lineStart), to: Math.min(snapshot.length, offset(section.lineEnd + 1)) };
         }
-
-        const criticRegex =
-          /\{(?:==|<mark[^>]*>)([\s\S]*?)(?:==|<\/mark>)\}\{(?:>>|&gt;&gt;)([\s\S]*?)(?:<<|&lt;&lt;)\}/g;
-
-        if (criticRegex.test(html)) {
-          criticRegex.lastIndex = 0;
-          const newHtml = html.replace(criticRegex, (m, orig, comm) => {
-            const cleanOrig = orig.replace(/<[^>]+>/g, "").trim();
-            const cleanComm = comm.replace(/<[^>]+>/g, "").trim();
-            return `<span class="cm-critic-highlight">${escapeHtml(
-              cleanOrig
-            )}</span><span class="cm-critic-badge" data-orig="${encodeURIComponent(
-              cleanOrig
-            )}" data-comm="${encodeURIComponent(
-              cleanComm
-            )}">💬 <span>${escapeHtml(cleanComm)}</span></span>`;
-          });
-
-          block.innerHTML = newHtml;
-
-          const badges = block.querySelectorAll(".cm-critic-badge");
-          badges.forEach((badge) => {
-            const origText = decodeURIComponent(badge.getAttribute("data-orig") || "");
-            const commText = decodeURIComponent(badge.getAttribute("data-comm") || "");
-
-            const handleBadgeAction = (e: Event) => {
-              e.stopPropagation();
-              e.preventDefault();
-              safeRunAction(() => {
-                openAnnotationManageModal(this.app, origText, commText);
-              });
-            };
-
-            badge.addEventListener("click", handleBadgeAction);
-            badge.addEventListener("touchend", handleBadgeAction);
-          });
-        }
-      }
+        renderReadingAnnotations(element, { file, path: file.path, snapshot }, bounds,
+          (original, comment, target) => openAnnotationManageModal(this.app, original, comment, target));
+      } catch (err) { console.warn("CriticFlow reading renderer:", err); }
     });
   }
 
@@ -785,13 +561,10 @@ export default class CriticMarkupPlugin extends Plugin {
         return;
       }
 
-      const txt = this.activeSelectedText;
-      const savedRange = this.savedEditorRange;
+      const addition = captureAddition(this.app) || this.savedAddition;
       this.hideFloatingBtn();
-
-      safeRunAction(() => {
-        openAddAnnotationModal(this.app, txt, savedRange || undefined);
-      });
+      if (!addition) return;
+      safeRunAction(() => openAddAnnotationModal(this.app, addition.text, addition.target));
     };
 
     this.floatingBtn.addEventListener("mousedown", triggerAnnotation);
@@ -799,24 +572,10 @@ export default class CriticMarkupPlugin extends Plugin {
   }
 
   private updateFloatingButton() {
-    let text = "";
-    this.savedEditorRange = null;
-
-    const ctx = resolveActiveContext(this.app);
-    if (ctx.editor) {
-      text = ctx.editor.getSelection().trim();
-      if (text) {
-        this.savedEditorRange = {
-          from: ctx.editor.getCursor("from"),
-          to: ctx.editor.getCursor("to"),
-        };
-      }
-    }
-
+    if (document.querySelector(".criticflow-modal-overlay")) return;
+    this.savedAddition = captureAddition(this.app);
+    const text = this.savedAddition?.text || "";
     const domSel = window.getSelection();
-    if (!text && domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-      text = domSel.toString().trim();
-    }
 
     if (!text || text.length === 0) {
       this.hideFloatingBtn();
@@ -866,32 +625,9 @@ export default class CriticMarkupPlugin extends Plugin {
       id: "criticmarkup-add-annotation",
       name: "添加划词批注 (Add Annotation)",
       callback: () => {
-        let selection = "";
-        let savedRange: { from: EditorPosition; to: EditorPosition } | undefined = undefined;
-
-        const ctx = resolveActiveContext(this.app);
-        if (ctx.editor) {
-          selection = ctx.editor.getSelection().trim();
-          if (selection) {
-            savedRange = {
-              from: ctx.editor.getCursor("from"),
-              to: ctx.editor.getCursor("to"),
-            };
-          }
-        }
-        if (!selection) {
-          const domSel = window.getSelection();
-          if (domSel && !domSel.isCollapsed) {
-            selection = domSel.toString().trim();
-          }
-        }
-
-        if (!selection) {
-          new Notice("请先划选要批注的一段文字");
-          return;
-        }
-
-        openAddAnnotationModal(this.app, selection, savedRange);
+        const addition = captureAddition(this.app);
+        if (!addition) { new Notice("请先在目标文档划选要批注的文字"); return; }
+        openAddAnnotationModal(this.app, addition.text, addition.target);
       },
       hotkeys: [{ modifiers: ["Mod", "Shift"], key: "c" }],
     });

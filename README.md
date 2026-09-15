@@ -1,12 +1,12 @@
 # CriticFlow ⚡️
 
-> **Universal Non-Invasive Markdown Annotation & Agent Review Suite**
-> 
-> *Write, annotate, and review Markdown seamlessly across **Paseo**, **Obsidian**, and **MarkEdit** with continuous sentence highlights, floating capsule badges, and 1-click Agent prompt compilation.*
+> **Markdown 批注与 Agent 审阅工具集（v1.2.0）**
+>
+> *面向 Paseo、Obsidian 与 MarkEdit 的 CriticMarkup 批注工作流。GitHub v1.2.0 为 prerelease；核心实现已完成，尚未完成全端实机验收。*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Format: CriticMarkup](https://img.shields.io/badge/Syntax-CriticMarkup-blue.svg)](https://criticmarkup.com/)
-[![Platforms](https://img.shields.io/badge/Platforms-Paseo%20|%20Obsidian%20|%20MarkEdit-brightgreen.svg)]()
+[![Platforms](https://img.shields.io/badge/Platforms-Paseo%20|%20Obsidian%20|%20MarkEdit-yellow.svg)]()
 
 ---
 
@@ -27,11 +27,20 @@
 
 | 客户端 | 适用场景 | 技术栈 | 交付目录 |
 |:---|:---|:---|:---|
-| **Obsidian** | 个人知识库、长文写作、双链生产流 | CodeMirror 6 ViewPlugin + Modal | [`packages/obsidian/`](./packages/obsidian) |
-| **MarkEdit** | macOS 原生极简单文件闪电审阅 | CodeMirror 6 MatchDecorator + WidgetType | [`packages/markedit/`](./packages/markedit) |
-| **Paseo** | 本地 Agent 协同、对话与编程主战壕 | React Native for Web + Native Bridge | [`packages/paseo/`](./packages/paseo) |
+| **Obsidian** | 个人知识库、长文写作、双链生产流 | CodeMirror 6 StateField + Modal | [`packages/obsidian/`](./packages/obsidian) |
+| **MarkEdit** | macOS 原生极简单文件闪电审阅 | CodeMirror 6 StateField + WidgetType | [`packages/markedit/`](./packages/markedit) |
+| **Paseo** | 本地 Agent 协同、对话与编程主战壕 | Paseo Plugin RPC + 网页 DOM | [`packages/paseo/`](./packages/paseo) |
 
 ---
+
+## ⚠️ v1.2.0 发布边界
+
+- GitHub v1.2.0 为 **prerelease**；核心实现已完成，但尚未完成全端实机验收。
+- **Obsidian**：目标覆盖 desktop/mobile。Reading View 的跨 section / 跨块长备注保留源码，建议编辑模式处理。
+- **MarkEdit**：仅支持 macOS。已核对 `saveDocument(): Promise<boolean>` 自动保存 API；API 缺失或失败时明确提示 `Cmd+S`。
+- **Paseo**：依赖网页 DOM 与 Paseo Plugin RPC，原生手机端不支持。保存是备份、最后检查与原子 rename，不是跨进程原子 CAS；请避免多个编辑器并写。
+- Paseo 跨段落或列表项等块级边界的批注暂时保留源码，高亮/气泡的这部分支持仍未完成，避免破坏渲染结构。
+- Obsidian 根目录 `main.js` / `styles.css` 已实际构建并同步。
 
 ## 🚀 安装与上手指南
 
@@ -40,22 +49,24 @@
 #### 方式 A：本地极速安装（推荐）
 1. 打开终端，将 `packages/obsidian` 复制到你的 Vault 插件目录：
    ```bash
-   cp -r packages/obsidian "/path/to/your/vault/.obsidian/plugins/criticflow-annotate"
+   mkdir -p "/path/to/your/vault/.obsidian/plugins/obsidian-criticmarkup"
+   cp packages/obsidian/{main.js,manifest.json,styles.css} "/path/to/your/vault/.obsidian/plugins/obsidian-criticmarkup/"
    ```
-2. 在 Obsidian **设置 -> 第三方插件** 中刷新，开启 **CriticMarkup Annotate & Review** 即可。
+2. Obsidian 最低版本为 **1.1.0**。在 **设置 -> 第三方插件** 中开启 **CriticMarkup Annotate & Review**；升级后重启应用。
+3. 如果旧版装在 `criticflow-annotate` 目录，先备份并移走该旧目录，停用旧入口，只保留 `obsidian-criticmarkup`，避免重复加载。
 
 #### 方式 B：通过 BRAT 插件一键测试
 1. 在 Obsidian 安装社区热门测试工具 **BRAT**；
-2. 在 BRAT 中添加 GitHub 仓库地址，即可自动拉取最新 Release 并安装。
+2. 在 BRAT 中添加 GitHub 仓库地址，并选择候选版本 `1.2.0`（默认最新稳定版可能仍为 `1.1.2`）。
 
 #### 方式 C：官方 Community Plugins 市场
-本项目符合官方审核规范，等待官方仓库合并后，可直接在官方市场搜索 `CriticFlow` 安装。
+本项目按官方格式准备；当前 v1.2.0 为 prerelease，尚未作为稳定版本提交官方市场。
 
 ---
 
 ### 2. MarkEdit (macOS) 扩展安装
 
-MarkEdit 是 macOS 上体验绝佳的原生 Markdown 编辑器。
+MarkEdit 仅支持 macOS，是原生 Markdown 编辑器。扩展已支持可用的 `saveDocument(): Promise<boolean>` 自动保存；API 缺失或失败时会提示使用 `Cmd+S`。
 
 #### 一键脚本安装：
 ```bash
@@ -63,20 +74,20 @@ cd packages/markedit
 bash install.sh
 ```
 或手动将 `criticmarkup-annotate.js` 复制到：
-`~/Library/Containers/app.cyan.markedit/Data/Documents/editor.js`
-重启 MarkEdit 即可在划选文字时自动浮现 `[ 📝 批注 ]` 小胶囊！
+`~/Library/Containers/app.cyan.markedit/Data/Documents/scripts/criticmarkup-annotate.js`
+不要再额外安装一份到 `editor.js`；旧双份安装的迁移和备份见 [MarkEdit 安装说明](./packages/markedit/README.md)。完成后重启 MarkEdit。
 
 ---
 
 ### 3. Paseo 插件安装
 
-直接将 `packages/paseo` 目录链接或复制到 Paseo 的插件工作区中，Paseo 客户端启动时将自动加载。
+在仓库根目录执行 `paseo plugin install ./packages/paseo`，按 CLI 提示信任此插件；升级本地源码后执行 `paseo plugin reload quote-selection`。该插件依赖 Paseo 网页 DOM 与 Plugin RPC，原生手机端不支持。
 
 ---
 
 ## ⌨️ 统一快捷键速查
 
-全平台保持完全一致的肌肉记忆：
+各宿主的快捷键以实际集成与验收结果为准，以下为当前设计目标（并非全端实测承诺）：
 
 | 快捷键 | 动作 | 说明 |
 |:---|:---|:---|

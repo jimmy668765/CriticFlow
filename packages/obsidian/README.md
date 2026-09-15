@@ -1,35 +1,23 @@
-# CriticMarkup Annotate & Review (Obsidian Plugin)
+# CriticMarkup Annotate & Review（Obsidian）
 
-专为 **Obsidian** 打造的沉浸式划词批注与 AI Agent 审阅工作流插件。
+为 Obsidian 提供划词批注与 Agent 审阅工作流。v1.2.0 为 GitHub prerelease；核心实现已完成，但尚未完成 desktop/mobile 实机验收。
 
-基于 **CodeMirror 6 原生 MatchDecorator 与 WidgetType** 构建，提供极致轻快、不破坏文本排版的所见即所得体验。
+## 核心能力
 
----
+- 划词创建批注，底层保存为标准 CriticMarkup：`{==原文==}{>>批注<<}`。
+- 批注目标冻结原始 `TFile`、路径、编辑器身份与全文快照。
+- 新增、编辑、删除均使用精确选区与 offset 替换，避免重复文本误定位。
+- Reading View 保存前检查文件快照；发生变化时保留弹窗并报错，不提示成功。
+- Reading renderer 按 section 范围映射源批注，有歧义时拒绝猜测；Live Preview 支持多行折叠。
+- `⌘ + Shift + E`：提取全文批注为 Agent 指令并复制到剪贴板。
+- `⌘ + Shift + C`：用当前选区打开批注；`⌥ + Shift + C`：切换预览与源码视图；`Esc`：关闭弹窗。
 
-## ✨ 核心特性
+## 已知限制
 
-1. **鼠标划词即浮现便签**：划选任何文本后，选区上方自动浮现【📝 批注】小胶囊，点击直接弹出卡片输入修改意见；
-2. **非侵入式折叠（所见即所得）**：底层存储为国际通用的标准 CriticMarkup 语法（`{==原文==}{>>批注<<}`），视图层自动隐形符号，呈现为**金色荧光正文 ＋ 词尾胶囊便签 `💬 批注内容`**；
-3. **点击便签管理**：点击任何已有批注气泡，弹出详情卡片，支持【🗑️ 删除批注】（一键还原原文）或【保存修改】；
-4. **一键提取给 Agent（⌘ + Shift + E）**：将全文所有批注按审阅标准编译为 Prompt 指令并复制到剪贴板，直接粘贴给 Claude Code / Codex / Pi；
-5. **快捷键完备**：
-   - `⌘ + Shift + C`：选区弹出批注卡片
-   - `⌘ + Shift + E`：提取全篇批注给 Agent
-   - `⌥ + Shift + C`：自由切换便签预览视图 / 源码纯文本视图
-   - `Esc`：快速关闭弹窗
+多行折叠的实现路径已完成，但尚未实机确认所有 Reading View 场景。跨独立渲染 section 或跨 Markdown 块的长备注保守保留 CriticMarkup 源码，不执行跨块 DOM 删除；此类批注建议在编辑模式处理。
 
----
+## 安装
 
-## 🚀 安装方式
+要求 Obsidian **1.1.0 或以上**。将 `main.js`、`manifest.json`、`styles.css` 放入 Vault 的 `.obsidian/plugins/obsidian-criticmarkup/`，然后在第三方插件中启用；升级后重启应用。
 
-### 方式一：本地极速安装（推荐）
-
-只需将本文件夹复制到你 Obsidian 库的插件目录：
-```bash
-# 复制到你的 Vault
-cp -r obsidian-criticmarkup /path/to/your/vault/.obsidian/plugins/obsidian-criticmarkup
-```
-然后在 Obsidian 设置 -> **第三方插件**中启用本插件即可。
-
-### 方式二：Obsidian Community Plugins 市场提交
-已包含符合官方规范的 `manifest.json`、`styles.css`、`main.js`，可以直接提交至 Obsidian 官方插件仓库。
+若旧版装在 `criticflow-annotate`，先备份并移走旧目录、停用旧入口，只保留与 manifest ID 一致的 `obsidian-criticmarkup`，避免重复加载。

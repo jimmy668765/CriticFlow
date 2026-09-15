@@ -1,4 +1,8 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
+import { annotateDocumentRpc, readDocumentAnnotationsRpc } from "./shared/rpc";
+import { renderAnnotations } from "./client/markup-renderer";
+import { captureDocumentContext, type DocumentContext } from "./client/document-context";
+import { captureTextAnchor, captureMarkAnchor } from "./client/selection-anchor";
 
 /**
  * Format selected text into a standard Markdown blockquote.
@@ -71,7 +75,7 @@ function isInsideInputElement(node: Node | null): boolean {
   const el = node instanceof HTMLElement ? node : node.parentElement;
   if (!el) return false;
   return !!el.closest(
-    'input, textarea, [data-testid="message-input-root"], [data-testid*="message-input"], [data-composer-input], #paseo-quote-selection-toolbar, #paseo-quote-annotation-popover'
+    'input, textarea, [data-testid="message-input-root"], [data-testid*="message-input"], [data-composer-input], #paseo-quote-selection-toolbar, #paseo-quote-annotation-popover, #paseo-critic-detail-modal'
   );
 }
 
@@ -96,6 +100,7 @@ export default function contribute(client: PluginClientContext) {
   let activeSelectedText = "";
   let activeSourceContainer: HTMLElement | null = null;
   let activeSavedRange: Range | null = null;
+  let activeDocument: DocumentContext | null = null;
   let hideTimeout: any = null;
   let isInteractingWithButton = false;
   let isInteractingWithPopover = false;
@@ -160,23 +165,46 @@ export default function contribute(client: PluginClientContext) {
     }, duration);
   }
 
-  // Close active annotation popover
+  // Remove synchronously: a delayed close must never remove a newly opened popover.
   function closeAnnotationPopover() {
-    if (!annotationPopover) return;
-    annotationPopover.style.opacity = "0";
-    annotationPopover.style.transform = "translateY(8px)";
-    annotationPopover.style.pointerEvents = "none";
-    setTimeout(() => {
-      if (annotationPopover && annotationPopover.parentNode) {
-        annotationPopover.parentNode.removeChild(annotationPopover);
-      }
-      annotationPopover = null;
-      isInteractingWithPopover = false;
-    }, 150);
+    annotationPopover?.remove();
+    annotationPopover = null;
+    isInteractingWithPopover = false;
+  }
+
+  function createAnnotationMark(text: string, comment: string, context?: DocumentContext | null) {
+    const mark = doc!.createElement("mark");
+    mark.className = "paseo-critic-mark";
+    mark.dataset.criticComment = comment;
+    if (context) {
+      mark.dataset.criticFile = context.filePath;
+      mark.dataset.criticWorkspace = context.workspaceId;
+    }
+    mark.textContent = text;
+    const badge = doc!.createElement("span");
+    badge.className = "paseo-critic-badge";
+    badge.appendChild(doc!.createTextNode("💬 "));
+    const label = doc!.createElement("span");
+    label.textContent = comment.length > 36 || comment.includes("\n") ? "查看批注" : comment;
+    badge.appendChild(label);
+    badge.title = "点击查看、修改或删除批注";
+    badge.onclick = e => { e.stopPropagation(); openCommentDetailModal(mark, text, mark.dataset.criticComment || ""); };
+    mark.appendChild(badge);
+    return mark;
   }
 
   // Open inline annotation popover (for Markdown document review & CriticMarkup)
   function openAnnotationPopover(textToAnnotate: string, defaultComment = "") {
+    // Keyboard/command actions may arrive before debounced selectionchange.
+    const liveSelection = win!.getSelection();
+    if (liveSelection && !liveSelection.isCollapsed && liveSelection.rangeCount) {
+      if (isInsideInputElement(liveSelection.anchorNode) || liveSelection.toString().trim() !== textToAnnotate.trim()) return;
+      activeSavedRange = liveSelection.getRangeAt(0).cloneRange();
+      const node = activeSavedRange.startContainer;
+      activeDocument = captureDocumentContext(node.nodeType === 1 ? node as HTMLElement : node.parentElement, win!.location.pathname);
+    } else if (!activeSavedRange?.startContainer.isConnected || activeSavedRange.toString().trim() !== textToAnnotate.trim()) {
+      showToast("选区已变化，请重新划选"); return;
+    }
     closeAnnotationPopover();
     hideToolbar();
 
@@ -335,135 +363,48 @@ export default function contribute(client: PluginClientContext) {
       gap: "5px",
       boxShadow: "0 2px 8px rgba(234, 179, 8, 0.35)",
     });
-    btnSubmit.innerHTML = `<span>✍️ 确认批注 (Enter)</span>`;
+    btnSubmit.textContent = "✍️ 保存批注 (⌘/Ctrl+Enter)";
+    const targetDocument = activeDocument; // Freeze identity before focus/navigation changes.
+    const savedRange = activeSavedRange?.cloneRange();
+    const anchor = savedRange ? captureTextAnchor(savedRange, textToAnnotate) : undefined;
+    let submitting = false;
 
-    const handleSubmit = () => {
+    const handleSubmit = async () => {
+      if (submitting) return;
       const comment = textarea.value.trim();
-      if (!comment) {
-        textarea.focus();
-        showToast("请先输入批注或修改要求");
-        return;
-      }
-
-      const criticText = formatCriticMarkupAnnotation(textToAnnotate, comment);
-      let applied = false;
-
-      // 1. If inside an editable node (e.g. Monaco/CodeMirror editor)
-      if (activeSourceContainer && (activeSourceContainer.isContentEditable || activeSourceContainer.tagName === "TEXTAREA")) {
-        try {
-          applied = doc!.execCommand("insertText", false, criticText);
-        } catch {}
-      }
-
-      // 2. In rendered Markdown view: wrap selection in visual highlight + sticky note badge
-      if (!applied && activeSavedRange) {
-        try {
-          const mark = doc!.createElement("mark");
-          mark.className = "paseo-critic-mark";
-          Object.assign(mark.style, {
-            backgroundColor: "rgba(234, 179, 8, 0.28)",
-            borderBottom: "2px solid #eab308",
-            borderRadius: "3px",
-            padding: "1px 3px",
-            color: "inherit",
-            display: "inline",
-          });
-
-          const badge = doc!.createElement("span");
-          badge.className = "paseo-critic-badge";
-          Object.assign(badge.style, {
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "3px",
-            backgroundColor: "#eab308",
-            color: "#18181b",
-            fontSize: "11px",
-            fontWeight: "700",
-            padding: "1px 6px",
-            borderRadius: "10px",
-            marginLeft: "6px",
-            verticalAlign: "middle",
-            cursor: "pointer",
-            boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
-            userSelect: "none",
-          });
-          badge.innerHTML = `💬 <span>${comment}</span>`;
-          badge.title = `批注：${comment} (点击可移除)`;
-          badge.onclick = (e) => {
-            e.stopPropagation();
-            if (confirm(`是否删除批注：“${comment}”？`)) {
-              const parent = mark.parentNode;
-              if (parent) {
-                while (mark.firstChild) {
-                  if (mark.firstChild === badge) {
-                    mark.removeChild(badge);
-                  } else {
-                    parent.insertBefore(mark.firstChild, mark);
-                  }
-                }
-                parent.removeChild(mark);
-              }
-              showToast("批注已移除");
-            }
-          };
-
-          const contents = activeSavedRange.extractContents();
-          mark.appendChild(contents);
-          mark.appendChild(badge);
-          activeSavedRange.insertNode(mark);
-          applied = true;
-        } catch (err) {
-          console.warn("[quote-selection] Visual annotation insertion error:", err);
+      if (!comment) { textarea.focus(); showToast("请先输入批注或修改要求"); return; }
+      if (!targetDocument) { showToast("未能绑定当前文档，请关闭批注框后在文档内重新划选"); return; }
+      submitting = true;
+      btnSubmit.disabled = true;
+      btnSubmit.textContent = "正在写入…";
+      try {
+        const result = await client.rpc(annotateDocumentRpc, {
+          ...targetDocument, originalText: textToAnnotate, comment, anchor,
+        });
+        if (!result.success) throw new Error(result.error || "保存失败");
+        // Only decorate a still-live, plain-text range after disk persistence succeeds.
+        // Never execCommand into a managed editor or move React-owned child elements.
+        if (savedRange?.startContainer.isConnected && savedRange.toString().trim() === textToAnnotate.trim()
+          && savedRange.startContainer === savedRange.endContainer && savedRange.startContainer.nodeType === 3
+          && !savedRange.startContainer.parentElement?.closest('[contenteditable="true"], .cm-editor, .monaco-editor')) {
+          try {
+            const mark = createAnnotationMark(textToAnnotate, comment, {
+              ...targetDocument, filePath: result.fullPath || targetDocument.filePath,
+            });
+            savedRange.deleteContents();
+            savedRange.insertNode(mark);
+          } catch { /* The host may already have re-rendered the saved document. */ }
         }
-      }
-
-      // 3. Keep CriticMarkup in clipboard
-      if (win!.navigator.clipboard) {
-        win!.navigator.clipboard.writeText(criticText);
-      }
-
-      // 4. Detect active tab/document title hint from DOM
-      let fileHint: string | undefined;
-      try {
-        const tabEls = Array.from(doc!.querySelectorAll<HTMLElement>('[role="tab"], [data-testid*="tab"], [data-testid*="header"], header, nav, div, span'));
-        for (const el of tabEls) {
-          const txt = (el.innerText || el.textContent || "").trim();
-          if (txt.includes(".md") || txt.includes(".markdown") || txt.includes("PPT") || txt.includes("企业介绍")) {
-            fileHint = txt;
-            break;
-          }
-        }
-      } catch {}
-
-      // 5. Call server backend to persist annotation directly into the local Markdown file!
-      try {
-        fetch("http://127.0.0.1:29789/annotate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            originalText: textToAnnotate,
-            comment: comment,
-            fileHint: fileHint,
-          }),
-        })
-          .then((res) => res.json())
-          .then((data) => {
-            if (data && data.success) {
-              showToast(`✅ 原文件 ${data.savedPath || "文档"} 已写入批注并高亮留痕！`, 3000);
-            } else {
-              showToast(`✅ 原文已挂载高亮便签！`, 2500);
-            }
-          })
-          .catch(() => {
-            showToast(`✅ 原文已挂载高亮便签！`, 2500);
-          });
-      } catch (e) {
-        showToast(`✅ 原文已挂载高亮便签！`, 2500);
-      }
-      closeAnnotationPopover();
-      try {
+        showToast(`✅ 已写入 ${result.savedPath}（原文已备份）`, 3500);
+        if (annotationPopover === popover) closeAnnotationPopover();
         win!.getSelection()?.removeAllRanges();
-      } catch {}
+      } catch (error) {
+        showToast(`未保存：${error instanceof Error ? error.message : String(error)}`, 5500);
+      } finally {
+        submitting = false;
+        btnSubmit.disabled = false;
+        btnSubmit.textContent = "✍️ 保存批注 (⌘/Ctrl+Enter)";
+      }
     };
 
     btnSubmit.onclick = handleSubmit;
@@ -472,7 +413,7 @@ export default function contribute(client: PluginClientContext) {
       if (e.key === "Escape") {
         closeAnnotationPopover();
         e.stopPropagation();
-      } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey || !e.shiftKey)) {
+      } else if (e.key === "Enter" && !e.isComposing && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         handleSubmit();
       }
@@ -494,7 +435,7 @@ export default function contribute(client: PluginClientContext) {
     if (selection && !selection.isCollapsed && selection.rangeCount > 0) {
       const rect = selection.getRangeAt(0).getBoundingClientRect();
       const popWidth = 360;
-      const popHeight = 210;
+      const popHeight = 250;
       const vHeight = win!.innerHeight;
       const vWidth = win!.innerWidth;
 
@@ -562,86 +503,19 @@ export default function contribute(client: PluginClientContext) {
 
   // 1. Locate the active composer textarea strictly bound to the CURRENT workspace/session
   function findComposerTextarea(sourceContainer?: HTMLElement | null): HTMLTextAreaElement | null {
-    const targetSource = sourceContainer || activeSourceContainer;
-
-    // Priority 1: Search strictly within the same workspace deck entry / pane container
-    if (targetSource) {
-      const container =
-        targetSource.closest<HTMLElement>('[data-testid^="workspace-pane-"]') ||
-        targetSource.closest<HTMLElement>('[data-testid^="workspace-deck-entry-"]') ||
-        targetSource.closest<HTMLElement>('[data-testid*="workspace"]') ||
-        targetSource.closest<HTMLElement>('[data-testid*="pane"]');
-
-      if (container) {
-        const localRoots = Array.from(
-          container.querySelectorAll<HTMLElement>('[data-testid="message-input-root"]')
-        ).filter(isElementVisibleAndActive);
-
-        for (const root of localRoots) {
-          const ta = root.querySelector<HTMLTextAreaElement>("textarea");
-          if (ta && isElementVisibleAndActive(ta)) {
-            return ta;
-          }
-        }
-
-        const directTa = container.querySelector<HTMLTextAreaElement>(
-          'textarea[data-composer-input], textarea[data-composerinput], textarea'
-        );
-        if (directTa && isElementVisibleAndActive(directTa)) {
-          return directTa;
-        }
-      }
+    const source = sourceContainer || activeSourceContainer;
+    const selector = '[data-testid="message-input-root"] textarea, textarea[data-composer-input], textarea[data-composerinput], textarea[data-testid="message-input"]';
+    const candidates = (root: ParentNode) => Array.from(root.querySelectorAll<HTMLTextAreaElement>(selector)).filter(isElementVisibleAndActive);
+    if (source) {
+      const pane = source.closest('[data-testid^="workspace-pane-"]');
+      const local = pane ? candidates(pane) : [];
+      if (local.length) return local.length === 1 ? local[0] : null;
+      const deck = source.closest('[data-testid^="workspace-deck-entry-"]');
+      const inWorkspace = deck ? candidates(deck) : [];
+      return inWorkspace.length === 1 ? inWorkspace[0] : null;
     }
-
-    // Priority 2: Filter all [data-testid="message-input-root"] elements to ONLY active/visible ones
-    const allRoots = Array.from(doc!.querySelectorAll<HTMLElement>('[data-testid="message-input-root"]'));
-    const visibleRoots = allRoots.filter(isElementVisibleAndActive);
-
-    if (visibleRoots.length > 0) {
-      if (targetSource) {
-        // If multiple panes are visible (e.g. split view), pick the one physically closest to selection
-        const sourceRect = targetSource.getBoundingClientRect();
-        let closestRoot = visibleRoots[0];
-        let minDistance = Infinity;
-
-        for (const root of visibleRoots) {
-          const r = root.getBoundingClientRect();
-          const dist = Math.hypot(r.left - sourceRect.left, r.top - sourceRect.top);
-          if (dist < minDistance) {
-            minDistance = dist;
-            closestRoot = root;
-          }
-        }
-
-        const ta = closestRoot.querySelector<HTMLTextAreaElement>("textarea");
-        if (ta && isElementVisibleAndActive(ta)) return ta;
-      }
-
-      // Default to the last visible root
-      const ta = visibleRoots[visibleRoots.length - 1].querySelector<HTMLTextAreaElement>("textarea");
-      if (ta && isElementVisibleAndActive(ta)) return ta;
-    }
-
-    // Priority 3: Any visible textarea with composer dataset attributes
-    const allComposerTextareas = Array.from(
-      doc!.querySelectorAll<HTMLTextAreaElement>(
-        'textarea[data-composer-input], textarea[data-composerinput], textarea[data-testid*="message-input"]'
-      )
-    ).filter(isElementVisibleAndActive);
-
-    if (allComposerTextareas.length > 0) {
-      return allComposerTextareas[allComposerTextareas.length - 1];
-    }
-
-    // Priority 4: Fallback to the last visible textarea in the DOM
-    const allTextareas = Array.from(doc!.querySelectorAll<HTMLTextAreaElement>("textarea")).filter(
-      isElementVisibleAndActive
-    );
-    if (allTextareas.length > 0) {
-      return allTextareas[allTextareas.length - 1];
-    }
-
-    return null;
+    const visible = candidates(doc!);
+    return visible.length === 1 ? visible[0] : null;
   }
 
   // 2. Inject formatted quote into composer
@@ -1141,6 +1015,8 @@ export default function contribute(client: PluginClientContext) {
     const anchorNode = selection.anchorNode;
     const anchorEl = anchorNode instanceof HTMLElement ? anchorNode : anchorNode?.parentElement;
 
+    activeDocument = captureDocumentContext(anchorEl || null, win!.location.pathname);
+
     // Track the source element & container where the text was selected
     activeSourceContainer = anchorEl
       ? anchorEl.closest<HTMLElement>('[data-testid^="workspace-pane-"]') ||
@@ -1404,6 +1280,7 @@ export default function contribute(client: PluginClientContext) {
   styleEl.id = "paseo-criticmarkup-styles";
   styleEl.textContent = `
     .paseo-critic-mark {
+      white-space: pre-wrap !important;
       background-color: rgba(234, 179, 8, 0.22) !important;
       border-bottom: 2px solid #eab308 !important;
       border-radius: 3px !important;
@@ -1435,8 +1312,11 @@ export default function contribute(client: PluginClientContext) {
   doc!.head.appendChild(styleEl);
 
   let commentDetailModal: HTMLDivElement | null = null;
+  let modalKeyHandler: ((e: KeyboardEvent) => void) | null = null;
 
   function closeCommentDetailModal() {
+    if (modalKeyHandler) win!.removeEventListener("keydown", modalKeyHandler, true);
+    modalKeyHandler = null;
     // 1. Remove tracked modal
     if (commentDetailModal) {
       commentDetailModal.remove();
@@ -1544,6 +1424,36 @@ export default function contribute(client: PluginClientContext) {
       outline: "none",
     });
     commentInput.value = currentComment;
+    const targetDocument = captureDocumentContext(markElement, win!.location.pathname);
+    const anchor = captureMarkAnchor(markElement, originalText);
+    let saving = false;
+
+    async function mutate(action: "edit" | "delete") {
+      if (saving) return;
+      const newComment = commentInput.value.trim();
+      if (action === "edit" && !newComment) { showToast("批注不能为空"); return; }
+      if (!targetDocument) { showToast("未能绑定当前文档，请在文档中重新打开该批注"); return; }
+      saving = true;
+      btnDelete.disabled = btnSave.disabled = true;
+      try {
+        const result = await client.rpc(annotateDocumentRpc, {
+          ...targetDocument, action, originalText, comment: currentComment, anchor,
+          ...(action === "edit" ? { newComment } : {}),
+        });
+        if (!result.success) throw new Error(result.error || "保存失败");
+        if (action === "delete") markElement.replaceWith(doc!.createTextNode(originalText));
+        else {
+          markElement.dataset.criticComment = newComment;
+          markElement.dataset.criticFile = result.fullPath || targetDocument.filePath;
+          markElement.dataset.criticWorkspace = targetDocument.workspaceId;
+          const label = markElement.querySelector(".paseo-critic-badge span");
+          if (label) label.textContent = newComment.length > 36 || newComment.includes("\n") ? "查看批注" : newComment;
+        }
+        if (commentDetailModal === modal) closeCommentDetailModal();
+        showToast(`✅ ${action === "delete" ? "已删除批注" : "已修改批注"}并写入 ${result.savedPath}`);
+      } catch (error) { showToast(`未保存：${error instanceof Error ? error.message : String(error)}`, 5500); }
+      finally { saving = false; btnDelete.disabled = btnSave.disabled = false; }
+    }
 
     // 4. Footer Actions
     const footer = doc!.createElement("div");
@@ -1572,33 +1482,7 @@ export default function contribute(client: PluginClientContext) {
       gap: "4px",
     });
 
-    btnDelete.onclick = () => {
-      // 1. Revert in DOM
-      const parent = markElement.parentNode;
-      if (parent) {
-        const textNode = doc!.createTextNode(originalText);
-        parent.replaceChild(textNode, markElement);
-      }
-      closeCommentDetailModal();
-
-      // 2. Call backend to revert in local file
-      fetch("http://127.0.0.1:29789/annotate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "delete",
-          originalText: originalText,
-          comment: currentComment,
-        }),
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          showToast("✅ 已成功删除该批注并写回原文件！");
-        })
-        .catch(() => {
-          showToast("✅ 视图中批注已删除");
-        });
-    };
+    btnDelete.onclick = () => { void mutate("delete"); };
 
     const rightBtns = doc!.createElement("div");
     Object.assign(rightBtns.style, { display: "flex", gap: "8px" });
@@ -1633,35 +1517,7 @@ export default function contribute(client: PluginClientContext) {
       cursor: "pointer",
     });
 
-    btnSave.onclick = () => {
-      const newComment = commentInput.value.trim();
-      if (!newComment) return;
-
-      // Update in DOM
-      const badge = markElement.querySelector(".paseo-critic-badge span");
-      if (badge) badge.textContent = newComment;
-
-      closeCommentDetailModal();
-
-      // Call backend to update in local file
-      fetch("http://127.0.0.1:29789/annotate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "edit",
-          originalText: originalText,
-          comment: currentComment,
-          newComment: newComment,
-        }),
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          showToast("✅ 批注已修改并更新回原文件！");
-        })
-        .catch(() => {
-          showToast("✅ 批注已更新");
-        });
-    };
+    btnSave.onclick = () => { void mutate("edit"); };
 
     rightBtns.appendChild(btnCancel);
     rightBtns.appendChild(btnSave);
@@ -1690,81 +1546,37 @@ export default function contribute(client: PluginClientContext) {
         win!.removeEventListener("keydown", onModalKey, true);
       }
     };
+    modalKeyHandler = onModalKey;
     win!.addEventListener("keydown", onModalKey, true);
   }
 
+  const decorating = new WeakSet<Element>();
+  let decoratorDisposed = false;
   function decoratePaseoCriticMarkup() {
-    const containers = doc!.querySelectorAll(
-      '[data-testid*="markdown"], [data-testid*="pane"], [data-testid*="workspace"], article, .prose'
-    );
-    const regex = /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g;
-
-    containers.forEach((container) => {
-      // Find text nodes or leaf nodes containing critic markup
-      const walker = doc!.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-      let node: Node | null;
-      const nodesToReplace: Text[] = [];
-
-      while ((node = walker.nextNode())) {
-        if (node.nodeValue && node.nodeValue.includes("{==") && node.nodeValue.includes("<<}")) {
-          // Exclude inputs, textareas, and code blocks
-          const parent = node.parentElement;
-          if (parent && !parent.closest("pre, code, textarea, input, #paseo-quote-annotation-popover")) {
-            nodesToReplace.push(node as Text);
-          }
-        }
-      }
-
-      nodesToReplace.forEach((textNode) => {
-        const text = textNode.nodeValue || "";
-        if (!regex.test(text)) return;
-        regex.lastIndex = 0;
-
-        const fragment = doc!.createDocumentFragment();
-        let lastIndex = 0;
-        let match: RegExpExecArray | null;
-
-        while ((match = regex.exec(text)) !== null) {
-          const before = text.slice(lastIndex, match.index);
-          if (before) fragment.appendChild(doc!.createTextNode(before));
-
-          const originalText = match[1];
-          const comment = match[2];
-
-          const mark = doc!.createElement("mark");
-          mark.className = "paseo-critic-mark";
-          mark.textContent = originalText;
-
-          const badge = doc!.createElement("span");
-          badge.className = "paseo-critic-badge";
-          badge.innerHTML = `💬 <span>${comment}</span>`;
-          badge.title = `审阅批注：${comment} (点击查看或删除)`;
-
-          badge.onclick = (e) => {
-            e.stopPropagation();
-            openCommentDetailModal(mark, originalText, comment);
-          };
-
-          mark.appendChild(badge);
-          fragment.appendChild(mark);
-          lastIndex = regex.lastIndex;
-        }
-
-        const remaining = text.slice(lastIndex);
-        if (remaining) fragment.appendChild(doc!.createTextNode(remaining));
-
-        if (textNode.parentNode) {
-          textNode.parentNode.replaceChild(fragment, textNode);
-        }
-      });
+    doc!.querySelectorAll<HTMLElement>('[data-testid="workspace-file-pane"]').forEach(container => {
+      if (decorating.has(container) || !container.textContent?.includes("{==")) return;
+      const context = captureDocumentContext(container, win!.location.pathname);
+      if (!context) return;
+      decorating.add(container);
+      void client.rpc(readDocumentAnnotationsRpc, context).then(result => {
+        if (decoratorDisposed || !container.isConnected) return;
+        const current = captureDocumentContext(container, win!.location.pathname);
+        if (current?.filePath !== context.filePath || current?.workspaceId !== context.workspaceId) return;
+        renderAnnotations(container, result.annotations, item => createAnnotationMark(item.originalText, item.comment, context));
+      }).catch(error => console.warn("[CriticFlow] 批注渲染未完成", error))
+        .finally(() => decorating.delete(container));
     });
   }
 
   const liveDecoratorInterval = setInterval(decoratePaseoCriticMarkup, 1500);
+  decoratePaseoCriticMarkup();
 
   // 11. Teardown / Cleanup
   return () => {
+    decoratorDisposed = true;
     clearInterval(liveDecoratorInterval);
+    if (toastTimeout) clearTimeout(toastTimeout);
+    closeCommentDetailModal();
     if (styleEl.parentNode) styleEl.parentNode.removeChild(styleEl);
 
     doc.removeEventListener("selectionchange", onSelectionChange);

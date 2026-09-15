@@ -1,946 +1,823 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const obsidian_1 = require("obsidian");
-const view_1 = require("@codemirror/view");
-
-const DEFAULT_SETTINGS = {
-    foldEnabled: true,
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
 };
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-function escapeHtml(str) {
-    return String(str)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-}
+// CriticFlow/packages/obsidian/main.ts
+var main_exports = {};
+__export(main_exports, {
+  default: () => CriticMarkupPlugin
+});
+module.exports = __toCommonJS(main_exports);
+var import_obsidian2 = require("obsidian");
+var import_view = require("@codemirror/view");
+var import_state = require("@codemirror/state");
 
-function escapeRegExp(str) {
-    return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-let activePluginInstance = null;
-let lastActionTimestamp = 0;
-
-function isMobileDevice() {
-    return (
-        window.innerWidth <= 768 ||
-        "ontouchstart" in window ||
-        navigator.maxTouchPoints > 0
-    );
-}
-
-// 4-tier context resolver across Desktop & Mobile
+// CriticFlow/packages/obsidian/document-target.ts
+var import_obsidian = require("obsidian");
+var prose = (text) => text.replace(/\{>>[\s\S]*?<<\}/g, "").replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/<[^>]*>/g, "").replace(/[^\p{L}\p{N}]/gu, "");
+var markupPattern = () => /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g;
+var hasMarkers = (text) => /\{==|==\}|\{>>|<<\}/.test(text);
 function resolveActiveContext(app) {
-    let view = app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
-
-    if (!view && app.workspace.activeLeaf && app.workspace.activeLeaf.view instanceof obsidian_1.MarkdownView) {
-        view = app.workspace.activeLeaf.view;
+  const view = app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+  return { view, file: view == null ? void 0 : view.file, editor: (view == null ? void 0 : view.getMode()) === "source" ? view.editor : void 0 };
+}
+function owningView(app, node) {
+  return app.workspace.getLeavesOfType("markdown").map((l) => l.view).find((v) => v instanceof import_obsidian.MarkdownView && v.contentEl.contains(node));
+}
+function visibleText(range) {
+  const fragment = range.cloneContents();
+  fragment.querySelectorAll(".cm-critic-badge, script, style, [aria-hidden=true]").forEach((e) => e.remove());
+  return prose(fragment.textContent || "");
+}
+function captureAddition(app) {
+  const selection = window.getSelection();
+  const range = selection && !selection.isCollapsed && selection.rangeCount ? selection.getRangeAt(0) : null;
+  const view = range ? owningView(app, range.startContainer) : resolveActiveContext(app).view;
+  if (!(view == null ? void 0 : view.file) || range && !view.contentEl.contains(range.endContainer)) return null;
+  const file = view.file;
+  if (view.getMode() === "source") {
+    const editor = view.editor, raw = editor.getSelection(), text2 = raw.trim();
+    if (!text2) return null;
+    const from = editor.posToOffset(editor.getCursor("from")) + raw.indexOf(text2);
+    return { text: text2, target: { file, path: file.path, view, editor, snapshot: editor.getValue(), from, to: from + text2.length } };
+  }
+  if (!range) return null;
+  const parent = range.startContainer.parentElement;
+  if (parent == null ? void 0 : parent.closest("pre, code, input, textarea, .cm-critic-badge, .criticflow-modal-overlay")) return null;
+  const text = selection.toString().trim();
+  const root = (parent == null ? void 0 : parent.closest(".markdown-preview-view")) || view.contentEl;
+  if (!text || !root.contains(range.endContainer)) return null;
+  const before = range.cloneRange();
+  before.selectNodeContents(root);
+  before.setEnd(range.startContainer, range.startOffset);
+  const after = range.cloneRange();
+  after.selectNodeContents(root);
+  after.setStart(range.endContainer, range.endOffset);
+  return { text, target: {
+    file,
+    path: file.path,
+    view,
+    snapshot: app.vault.read(file).catch(() => null),
+    before: visibleText(before).slice(-96),
+    after: visibleText(after).slice(0, 96)
+  } };
+}
+function targetForWidget(app, cm, badge) {
+  const view = owningView(app, cm.dom);
+  if (!(view == null ? void 0 : view.file)) return null;
+  const snapshot = cm.state.doc.toString(), pos = cm.posAtDOM(badge);
+  const match = [...snapshot.matchAll(markupPattern())].find((m) => pos >= m.index && pos < m.index + m[0].length);
+  if (!match) return null;
+  return { file: view.file, path: view.file.path, view, cm, snapshot, from: match.index, to: match.index + match[0].length };
+}
+function locate(snapshot, expected, target) {
+  if (target.from !== void 0 && target.to !== void 0) {
+    if (snapshot.slice(target.from, target.to) !== expected) throw new Error("\u6279\u6CE8\u4F4D\u7F6E\u6216\u539F\u6587\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u6279\u6CE8");
+    if (!hasMarkers(expected) && [...snapshot.matchAll(markupPattern())].some((m) => target.from < m.index + m[0].length && target.to > m.index))
+      throw new Error("\u9009\u533A\u4F4D\u4E8E\u5DF2\u6709\u6279\u6CE8\u4E2D\uFF0C\u8BF7\u70B9\u51FB\u6C14\u6CE1\u7F16\u8F91");
+    return { from: target.from, to: target.to };
+  }
+  const occupied = [...snapshot.matchAll(markupPattern())].map((m) => [m.index, m.index + m[0].length]);
+  const candidates = [];
+  for (let at = snapshot.indexOf(expected); at >= 0; at = snapshot.indexOf(expected, at + 1)) {
+    if (occupied.some(([from, to]) => at < to && at + expected.length > from)) continue;
+    const before = (target.before || "").slice(-48), after = (target.after || "").slice(0, 48);
+    if ((!before || prose(snapshot.slice(0, at)).endsWith(before)) && (!after || prose(snapshot.slice(at + expected.length)).startsWith(after))) candidates.push(at);
+  }
+  if (candidates.length !== 1) throw new Error("\u9009\u533A\u4E0E\u6E90\u6587\u4EF6\u65E0\u6CD5\u552F\u4E00\u5BF9\u5E94\uFF0C\u672A\u5199\u5165\uFF1B\u8BF7\u5728\u7F16\u8F91\u6A21\u5F0F\u6279\u6CE8");
+  return { from: candidates[0], to: candidates[0] + expected.length };
+}
+async function replaceTarget(app, target, expected, replacement) {
+  var _a;
+  const snapshot = await target.snapshot;
+  if (snapshot === null || target.file.path !== target.path) throw new Error("\u539F\u6587\u4EF6\u5DF2\u79FB\u52A8\u6216\u8BFB\u53D6\u5931\u8D25\uFF0C\u672A\u5199\u5165");
+  const { from, to } = locate(snapshot, expected, target);
+  if (target.cm || target.editor) {
+    if (((_a = target.view) == null ? void 0 : _a.file) !== target.file || target.view.getMode() !== "source") throw new Error("\u539F\u7F16\u8F91\u5668\u5DF2\u5207\u6362\uFF0C\u672A\u5199\u5165");
+    if (target.cm) {
+      if (!target.cm.dom.isConnected || target.cm.state.doc.toString() !== snapshot) throw new Error("\u6587\u6863\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u6279\u6CE8");
+      target.cm.dispatch({ changes: { from, to, insert: replacement } });
+    } else {
+      const editor = target.editor;
+      if (editor !== target.view.editor || editor.getValue() !== snapshot) throw new Error("\u6587\u6863\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u5212\u9009");
+      editor.replaceRange(replacement, editor.offsetToPos(from), editor.offsetToPos(to));
     }
-
-    if (!view) {
-        const leaves = app.workspace.getLeavesOfType("markdown");
-        if (leaves && leaves.length > 0 && leaves[0].view instanceof obsidian_1.MarkdownView) {
-            view = leaves[0].view;
-        }
-    }
-
-    let file = view?.file || app.workspace.getActiveFile();
-    if (!file) {
-        const leaves = app.workspace.getLeavesOfType("markdown");
-        for (const leaf of leaves) {
-            if (leaf.view && leaf.view.file) {
-                file = leaf.view.file;
-                break;
-            }
-        }
-    }
-
-    return { view, file, editor: view?.editor };
+    return "editor";
+  }
+  for (const leaf of app.workspace.getLeavesOfType("markdown")) {
+    const view = leaf.view;
+    if (view instanceof import_obsidian.MarkdownView && view.file === target.file && view.getMode() === "source" && view.editor.getValue() !== snapshot)
+      throw new Error("\u8BE5\u6587\u4EF6\u6709\u672A\u540C\u6B65\u7684\u7F16\u8F91\u5185\u5BB9\uFF0C\u672A\u8986\u76D6");
+  }
+  await app.vault.process(target.file, (current) => {
+    if (current !== snapshot) throw new Error("\u6587\u4EF6\u5DF2\u53D8\u5316\uFF0C\u672A\u8986\u76D6\uFF1B\u8BF7\u91CD\u65B0\u6253\u5F00\u6279\u6CE8");
+    return current.slice(0, from) + replacement + current.slice(to);
+  });
+  return "file";
 }
 
+// CriticFlow/packages/obsidian/reading-renderer.ts
+function renderReadingAnnotations(root, target, bounds, open) {
+  var _a;
+  const doc = root.ownerDocument;
+  const nodes = [];
+  let text = "";
+  function visit(node) {
+    if (node.nodeType === 3) {
+      const value = node.nodeValue || "";
+      nodes.push({ node, from: text.length, to: text.length + value.length });
+      text += value;
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const el = node;
+    if (el.matches("pre, code, script, style, input, textarea, .cm-critic-badge, .criticflow-reading-mark")) {
+      text += "\0";
+      return;
+    }
+    if (el.tagName === "MARK") text += "==";
+    for (const child of Array.from(el.childNodes)) visit(child);
+    if (el.tagName === "MARK") text += "==";
+  }
+  visit(root);
+  const raw = [...target.snapshot.matchAll(markupPattern())].filter((m) => !bounds || m.index >= bounds.from && m.index + m[0].length <= bounds.to);
+  const visible = [...text.matchAll(/\{==([^\0]*?)==\}\{>>([^\0]*?)<<\}/g)];
+  const key = (orig, comment) => JSON.stringify([prose(orig), prose(comment)]);
+  const consumed = /* @__PURE__ */ new Set();
+  const plans = visible.map((m) => {
+    const id = key(m[1], m[2]), candidates = raw.filter((r) => key(r[1], r[2]) === id);
+    const count = visible.filter((v) => key(v[1], v[2]) === id).length;
+    if (candidates.length !== count || !bounds && count !== 1) return null;
+    const source = candidates.find((r) => !consumed.has(r.index));
+    if (!source) return null;
+    consumed.add(source.index);
+    return { m, source };
+  });
+  for (const plan of plans.reverse()) {
+    if (!plan) continue;
+    const { m, source } = plan, start = m.index, end = start + m[0].length;
+    const first = nodes.find((n) => n.from <= start && n.to > start), last = nodes.find((n) => n.from < end && n.to >= end);
+    if (!first || !last) continue;
+    const blocks = "p, li, dt, dd, h1, h2, h3, h4, h5, h6, td, th, blockquote, section, article, div";
+    const block = (_a = first.node.parentElement) == null ? void 0 : _a.closest(blocks);
+    if (nodes.some((n) => {
+      var _a2;
+      return n.to > start && n.from < end && ((_a2 = n.node.parentElement) == null ? void 0 : _a2.closest(blocks)) !== block;
+    })) continue;
+    const wrapper = doc.createElement("span");
+    wrapper.className = "criticflow-reading-mark";
+    const highlight = doc.createElement("span");
+    highlight.className = "cm-critic-highlight";
+    highlight.textContent = source[1];
+    const badge = doc.createElement("span");
+    badge.className = "cm-critic-badge";
+    badge.textContent = "\u{1F4AC} " + (source[2].length > 36 || source[2].includes("\n") ? "\u67E5\u770B\u6279\u6CE8" : source[2]);
+    badge.title = source[2];
+    const bound = { ...target, from: source.index, to: source.index + source[0].length };
+    let lastOpen = 0;
+    const onOpen = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (Date.now() - lastOpen < 350) return;
+      lastOpen = Date.now();
+      open(source[1], source[2], bound);
+    };
+    badge.addEventListener("click", onOpen);
+    badge.addEventListener("touchend", onOpen);
+    wrapper.append(highlight, badge);
+    const range = doc.createRange();
+    range.setStart(first.node, start - first.from);
+    range.setEnd(last.node, end - last.from);
+    const insertion = range.cloneRange();
+    insertion.collapse(true);
+    range.deleteContents();
+    insertion.insertNode(wrapper);
+  }
+}
+
+// CriticFlow/packages/obsidian/main.ts
+var DEFAULT_SETTINGS = {
+  foldEnabled: true
+};
+function escapeHtml(str) {
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+var activePluginInstance = null;
+var lastActionTimestamp = 0;
+function isMobileDevice() {
+  return window.innerWidth <= 768 || "ontouchstart" in window || navigator.maxTouchPoints > 0;
+}
 function safeRunAction(action) {
-    const now = Date.now();
-    if (now - lastActionTimestamp < 350) {
-        return;
-    }
-    lastActionTimestamp = now;
-    action();
+  const now = Date.now();
+  if (now - lastActionTimestamp < 350) {
+    return;
+  }
+  lastActionTimestamp = now;
+  action();
 }
-
 function closeAllCriticModals() {
-    const modals = document.querySelectorAll(".criticflow-modal-overlay");
-    modals.forEach((el) => el.remove());
+  const modals = document.querySelectorAll(".criticflow-modal-overlay");
+  modals.forEach((el) => el.remove());
 }
-
-/**
- * 1. 新建划词批注弹窗
- */
-function openAddAnnotationModal(app, selectedText, savedRange) {
-    closeAllCriticModals();
-
-    const overlay = document.createElement("div");
-    overlay.className = "criticflow-modal-overlay";
-    overlay.style.cssText = `
-        position: fixed;
-        top: 0; left: 0; width: 100vw; height: 100vh;
-        background-color: rgba(0, 0, 0, 0.75);
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-        z-index: 99999999;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 16px;
-        box-sizing: border-box;
-    `;
-
-    const modal = document.createElement("div");
-    modal.className = "criticflow-modal-card";
-    modal.style.cssText = `
-        width: 100%;
-        max-width: 440px;
-        background-color: #18181b;
-        border: 1px solid rgba(255, 255, 255, 0.22);
-        border-radius: 14px;
-        box-shadow: 0 24px 50px rgba(0, 0, 0, 0.8);
-        padding: 20px;
-        color: #ffffff;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        box-sizing: border-box;
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-    `;
-
-    const title = document.createElement("div");
-    title.style.cssText = "font-size: 16px; font-weight: 700; color: #f4f4f5; display: flex; align-items: center; gap: 6px;";
-    title.innerHTML = `<span>✍️</span><span>添加划词批注</span>`;
-    modal.appendChild(title);
-
-    const quoteBox = document.createElement("div");
-    quoteBox.style.cssText = `
-        padding: 8px 12px;
-        border-radius: 8px;
-        background: rgba(234, 179, 8, 0.18);
-        border-left: 3px solid #eab308;
-        color: #fef08a;
-        font-size: 13px;
-        line-height: 1.4;
-        word-break: break-word;
-        max-height: 80px;
-        overflow-y: auto;
-    `;
-    quoteBox.textContent = `“${selectedText}”`;
-    modal.appendChild(quoteBox);
-
-    const textarea = document.createElement("textarea");
-    textarea.placeholder = "输入修改建议或批注内容 (按 ⌘+Enter 插入)...";
-    textarea.style.cssText = `
-        width: 100%;
-        height: 85px;
-        padding: 10px;
-        border-radius: 8px;
-        background: #27272a;
-        border: 1px solid rgba(255, 255, 255, 0.15);
-        color: #ffffff;
-        font-size: 14px;
-        line-height: 1.4;
-        box-sizing: border-box;
-        resize: none;
-        outline: none;
-    `;
-    modal.appendChild(textarea);
-
-    const footer = document.createElement("div");
-    footer.style.cssText = "display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px;";
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.textContent = "取消";
-    cancelBtn.style.cssText = `
-        padding: 8px 14px;
-        border-radius: 8px;
-        background: #3f3f46;
-        border: none;
-        color: #e4e4e7;
-        font-size: 13px;
-        font-weight: 600;
-        cursor: pointer;
-    `;
-    cancelBtn.onclick = () => {
-        overlay.remove();
-        activePluginInstance?.resetSelectionState();
-    };
-
-    const submitBtn = document.createElement("button");
-    submitBtn.textContent = "✍️ 插入批注";
-    submitBtn.style.cssText = `
-        padding: 8px 18px;
-        border-radius: 8px;
-        background: linear-gradient(135deg, #eab308, #ca8a04);
-        border: none;
-        color: #18181b;
-        font-size: 13px;
-        font-weight: 700;
-        cursor: pointer;
-    `;
-
-    const doSubmit = async () => {
-        const comment = textarea.value.trim();
-        if (!comment) {
-            new obsidian_1.Notice("请输入批注内容");
+function openAddAnnotationModal(app, selectedText, target) {
+  closeAllCriticModals();
+  const overlay = document.createElement("div");
+  overlay.className = "criticflow-modal-overlay";
+  overlay.style.cssText = `
+    position: fixed;
+    top: 0; left: 0; width: 100vw; height: 100vh;
+    background-color: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 99999999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    box-sizing: border-box;
+  `;
+  const modal = document.createElement("div");
+  modal.className = "criticflow-modal-card";
+  modal.style.cssText = `
+    width: 100%;
+    max-width: 440px;
+    background-color: #18181b;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 14px;
+    box-shadow: 0 24px 50px rgba(0, 0, 0, 0.8);
+    padding: 20px;
+    color: #ffffff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  `;
+  const title = document.createElement("div");
+  title.style.cssText = "font-size: 16px; font-weight: 700; color: #f4f4f5; display: flex; align-items: center; gap: 6px;";
+  title.innerHTML = `<span>\u270D\uFE0F</span><span>\u6DFB\u52A0\u5212\u8BCD\u6279\u6CE8</span>`;
+  modal.appendChild(title);
+  const quoteBox = document.createElement("div");
+  quoteBox.style.cssText = `
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(234, 179, 8, 0.18);
+    border-left: 3px solid #eab308;
+    color: #fef08a;
+    font-size: 13px;
+    line-height: 1.4;
+    word-break: break-word;
+    max-height: 80px;
+    overflow-y: auto;
+  `;
+  quoteBox.textContent = `\u201C${selectedText}\u201D`;
+  modal.appendChild(quoteBox);
+  const textarea = document.createElement("textarea");
+  textarea.placeholder = "\u8F93\u5165\u4FEE\u6539\u5EFA\u8BAE\u6216\u6279\u6CE8\u5185\u5BB9 (\u6309 \u2318+Enter \u63D2\u5165)...";
+  textarea.style.cssText = `
+    width: 100%;
+    height: 85px;
+    padding: 10px;
+    border-radius: 8px;
+    background: #27272a;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #ffffff;
+    font-size: 14px;
+    line-height: 1.4;
+    box-sizing: border-box;
+    resize: none;
+    outline: none;
+  `;
+  modal.appendChild(textarea);
+  const footer = document.createElement("div");
+  footer.style.cssText = "display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px;";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.textContent = "\u53D6\u6D88";
+  cancelBtn.style.cssText = `
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: #3f3f46;
+    border: none;
+    color: #e4e4e7;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  `;
+  cancelBtn.onclick = () => {
+    overlay.remove();
+    activePluginInstance == null ? void 0 : activePluginInstance.resetSelectionState();
+  };
+  const submitBtn = document.createElement("button");
+  submitBtn.textContent = "\u270D\uFE0F \u63D2\u5165\u6279\u6CE8";
+  submitBtn.style.cssText = `
+    padding: 8px 18px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #eab308, #ca8a04);
+    border: none;
+    color: #18181b;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+  `;
+  let saving = false;
+  const doSubmit = async () => {
+    if (saving) return;
+    const comment = textarea.value.trim();
+    if (!comment) {
+      new import_obsidian2.Notice("\u8BF7\u8F93\u5165\u6279\u6CE8\u5185\u5BB9");
+      return;
+    }
+    if (hasMarkers(selectedText + comment)) {
+      new import_obsidian2.Notice("\u4E0D\u652F\u6301\u5D4C\u5957\u6279\u6CE8\u6216 CriticMarkup \u5206\u9694\u7B26");
+      return;
+    }
+    saving = true;
+    submitBtn.disabled = true;
+    try {
+      const result = await replaceTarget(app, target, selectedText, `{==${selectedText}==}{>>${comment}<<}`);
+      new import_obsidian2.Notice(result === "file" ? "\u2705 \u5DF2\u4FDD\u5B58\u5230\u539F\u6587\u4EF6" : "\u2705 \u5DF2\u5199\u5165\u539F\u7F16\u8F91\u5668\uFF0C\u7531 Obsidian \u81EA\u52A8\u4FDD\u5B58");
+      overlay.remove();
+      activePluginInstance == null ? void 0 : activePluginInstance.resetSelectionState();
+    } catch (err) {
+      new import_obsidian2.Notice("\u274C \u672A\u4FDD\u5B58\uFF1A" + String(err));
+    } finally {
+      saving = false;
+      submitBtn.disabled = false;
+    }
+  };
+  submitBtn.onclick = () => safeRunAction(doSubmit);
+  footer.appendChild(cancelBtn);
+  footer.appendChild(submitBtn);
+  modal.appendChild(footer);
+  overlay.appendChild(modal);
+  const openTime = Date.now();
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay && Date.now() - openTime > 400) {
+      overlay.remove();
+      activePluginInstance == null ? void 0 : activePluginInstance.resetSelectionState();
+    }
+  });
+  textarea.addEventListener("keydown", (e) => {
+    if (!e.isComposing && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      void doSubmit();
+    }
+    if (e.key === "Escape") {
+      overlay.remove();
+      activePluginInstance == null ? void 0 : activePluginInstance.resetSelectionState();
+    }
+  });
+  document.body.appendChild(overlay);
+  setTimeout(() => textarea.focus(), 80);
+}
+function openAnnotationManageModal(app, originalText, comment, target) {
+  closeAllCriticModals();
+  const overlay = document.createElement("div");
+  overlay.className = "criticflow-modal-overlay";
+  overlay.style.cssText = `
+    position: fixed;
+    top: 0; left: 0; width: 100vw; height: 100vh;
+    background-color: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 99999999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    box-sizing: border-box;
+  `;
+  const modal = document.createElement("div");
+  modal.className = "criticflow-modal-card";
+  modal.style.cssText = `
+    width: 100%;
+    max-width: 440px;
+    background-color: #18181b;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 14px;
+    box-shadow: 0 24px 50px rgba(0, 0, 0, 0.8);
+    padding: 20px;
+    color: #ffffff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  `;
+  const title = document.createElement("div");
+  title.style.cssText = "font-size: 16px; font-weight: 700; color: #f4f4f5; display: flex; align-items: center; gap: 6px;";
+  title.innerHTML = `<span>\u{1F4AC}</span><span>\u6279\u6CE8\u8BE6\u60C5</span>`;
+  modal.appendChild(title);
+  const quoteBox = document.createElement("div");
+  quoteBox.style.cssText = `
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(234, 179, 8, 0.18);
+    border-left: 3px solid #eab308;
+    color: #fef08a;
+    font-size: 13px;
+    line-height: 1.4;
+    word-break: break-word;
+    max-height: 80px;
+    overflow-y: auto;
+  `;
+  quoteBox.textContent = `\u201C${originalText}\u201D`;
+  modal.appendChild(quoteBox);
+  const textarea = document.createElement("textarea");
+  textarea.value = comment;
+  textarea.style.cssText = `
+    width: 100%;
+    height: 85px;
+    padding: 10px;
+    border-radius: 8px;
+    background: #27272a;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #ffffff;
+    font-size: 14px;
+    line-height: 1.4;
+    box-sizing: border-box;
+    resize: none;
+    outline: none;
+  `;
+  modal.appendChild(textarea);
+  const footer = document.createElement("div");
+  footer.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-top: 4px; gap: 8px;";
+  const deleteBtn = document.createElement("button");
+  deleteBtn.textContent = "\u{1F5D1}\uFE0F \u5220\u9664\u6B64\u6279\u6CE8";
+  deleteBtn.style.cssText = `
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(239, 68, 68, 0.2);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: #f87171;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  `;
+  const rightGroup = document.createElement("div");
+  rightGroup.style.cssText = "display: flex; gap: 8px;";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.textContent = "\u53D6\u6D88";
+  cancelBtn.style.cssText = `
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: #3f3f46;
+    border: none;
+    color: #e4e4e7;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  `;
+  cancelBtn.onclick = () => overlay.remove();
+  const saveBtn = document.createElement("button");
+  saveBtn.textContent = "\u4FDD\u5B58\u4FEE\u6539";
+  saveBtn.style.cssText = `
+    padding: 8px 16px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #eab308, #ca8a04);
+    border: none;
+    color: #18181b;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+  `;
+  let saving = false;
+  const updateDoc = async (newCommentOrNull) => {
+    if (saving) return;
+    if (newCommentOrNull !== null && hasMarkers(newCommentOrNull)) {
+      new import_obsidian2.Notice("\u6279\u6CE8\u5185\u5BB9\u4E0D\u80FD\u542B CriticMarkup \u5206\u9694\u7B26");
+      return;
+    }
+    saving = true;
+    saveBtn.disabled = deleteBtn.disabled = true;
+    try {
+      const expected = `{==${originalText}==}{>>${comment}<<}`;
+      const replacement = newCommentOrNull === null ? originalText : `{==${originalText}==}{>>${newCommentOrNull.trim()}<<}`;
+      const result = await replaceTarget(app, target, expected, replacement);
+      overlay.remove();
+      new import_obsidian2.Notice(result === "file" ? "\u2705 \u5DF2\u4FDD\u5B58\u5230\u539F\u6587\u4EF6" : "\u2705 \u5DF2\u66F4\u65B0\u539F\u7F16\u8F91\u5668\uFF0C\u7531 Obsidian \u81EA\u52A8\u4FDD\u5B58");
+    } catch (err) {
+      new import_obsidian2.Notice("\u274C \u672A\u4FDD\u5B58\uFF1A" + String(err));
+    } finally {
+      saving = false;
+      saveBtn.disabled = deleteBtn.disabled = false;
+    }
+  };
+  deleteBtn.onclick = () => safeRunAction(() => updateDoc(null));
+  saveBtn.onclick = () => {
+    const val = textarea.value.trim();
+    if (!val) {
+      new import_obsidian2.Notice("\u6279\u6CE8\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A");
+      return;
+    }
+    safeRunAction(() => updateDoc(val));
+  };
+  footer.appendChild(deleteBtn);
+  rightGroup.appendChild(cancelBtn);
+  rightGroup.appendChild(saveBtn);
+  footer.appendChild(rightGroup);
+  modal.appendChild(footer);
+  overlay.appendChild(modal);
+  const openTime = Date.now();
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay && Date.now() - openTime > 400) {
+      overlay.remove();
+    }
+  });
+  textarea.addEventListener("keydown", (e) => {
+    if (!e.isComposing && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      saveBtn.click();
+    }
+    if (e.key === "Escape") {
+      overlay.remove();
+    }
+  });
+  document.body.appendChild(overlay);
+  setTimeout(() => textarea.focus(), 80);
+}
+var CriticBadgeWidget = class extends import_view.WidgetType {
+  constructor(original, comment) {
+    super();
+    this.original = original;
+    this.comment = comment;
+  }
+  eq(other) {
+    return this.original === other.original && this.comment === other.comment;
+  }
+  toDOM(view) {
+    const badge = document.createElement("span");
+    badge.className = "cm-critic-badge";
+    badge.innerHTML = `\u{1F4AC} <span>${escapeHtml(this.comment.length > 36 || this.comment.includes("\n") ? "\u67E5\u770B\u6279\u6CE8" : this.comment)}</span>`;
+    badge.title = `\u6279\u6CE8\uFF1A${this.comment} (\u70B9\u51FB\u67E5\u770B\u6216\u5220\u9664)`;
+    const handleOpen = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (activePluginInstance) {
+        safeRunAction(() => {
+          const app = activePluginInstance.app;
+          const target = targetForWidget(app, view, badge);
+          if (!target) {
+            new import_obsidian2.Notice("\u65E0\u6CD5\u5B9A\u4F4D\u5F53\u524D\u6279\u6CE8\uFF0C\u672A\u4FEE\u6539");
             return;
-        }
-
-        const cleanOrig = selectedText.trim();
-        const critic = `{==${cleanOrig}==}{>>${comment}<<}`;
-        const ctx = resolveActiveContext(app);
-
-        // Immediate DOM highlight injection for zero-latency visual feedback
-        try {
-            const domSel = window.getSelection();
-            if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-                const range = domSel.getRangeAt(0);
-                const spanWrapper = document.createElement("span");
-                spanWrapper.className = "cm-critic-wrapper";
-                spanWrapper.innerHTML = `<span class="cm-critic-highlight">${escapeHtml(cleanOrig)}</span><span class="cm-critic-badge" data-orig="${encodeURIComponent(cleanOrig)}" data-comm="${encodeURIComponent(comment)}">💬 <span>${escapeHtml(comment)}</span></span>`;
-                range.deleteContents();
-                range.insertNode(spanWrapper);
-                domSel.removeAllRanges();
-
-                const badge = spanWrapper.querySelector(".cm-critic-badge");
-                if (badge) {
-                    const handleBadgeAction = (e) => {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        safeRunAction(() => {
-                            openAnnotationManageModal(app, cleanOrig, comment);
-                        });
-                    };
-                    badge.addEventListener("click", handleBadgeAction);
-                    badge.addEventListener("touchend", handleBadgeAction);
-                }
-            }
-        } catch (e) {
-            console.debug("CriticFlow immediate DOM injection fallback:", e);
-        }
-
-        // Persist to underlying document
-        if (ctx.view && ctx.view.getMode() === "source" && ctx.editor) {
-            const editor = ctx.editor;
-            if (savedRange) {
-                editor.replaceRange(critic, savedRange.from, savedRange.to);
-            } else {
-                const docVal = editor.getValue();
-                const idx = docVal.indexOf(cleanOrig);
-                if (idx !== -1) {
-                    const fromPos = editor.offsetToPos(idx);
-                    const toPos = editor.offsetToPos(idx + cleanOrig.length);
-                    editor.replaceRange(critic, fromPos, toPos);
-                } else {
-                    editor.replaceSelection(critic);
-                }
-            }
-
-            // Blur editor to trigger Live Preview folding exit
-            try {
-                if (editor.blur) editor.blur();
-            } catch {}
-
-            new obsidian_1.Notice("✅ 已插入划词批注！");
-        } else if (ctx.file) {
-            try {
-                const file = ctx.file;
-                const oldContent = await app.vault.read(file);
-                const safeOrig = escapeRegExp(cleanOrig);
-                let pattern = new RegExp(safeOrig);
-
-                if (!pattern.test(oldContent)) {
-                    const words = cleanOrig.split(/\s+/).map(escapeRegExp).join("\\s+");
-                    pattern = new RegExp(words);
-                }
-
-                if (pattern.test(oldContent)) {
-                    const newContent = oldContent.replace(pattern, critic);
-                    await app.vault.modify(file, newContent);
-                    new obsidian_1.Notice("✅ 已在文件中插入批注！");
-
-                    setTimeout(() => {
-                        if (ctx.view) {
-                            if (ctx.view.leaf && ctx.view.leaf.rebuildView) {
-                                ctx.view.leaf.rebuildView();
-                            } else if (ctx.view.previewMode && ctx.view.previewMode.rerender) {
-                                ctx.view.previewMode.rerender(true);
-                            }
-                        }
-                    }, 100);
-                } else {
-                    new obsidian_1.Notice("⚠️ 未能在原文中定位选区");
-                }
-            } catch (err) {
-                new obsidian_1.Notice("❌ 批注写入失败：" + String(err));
-            }
-        }
-
-        overlay.remove();
-        activePluginInstance?.resetSelectionState();
-    };
-
-    submitBtn.onclick = () => safeRunAction(doSubmit);
-
-    footer.appendChild(cancelBtn);
-    footer.appendChild(submitBtn);
-    modal.appendChild(footer);
-    overlay.appendChild(modal);
-
-    const openTime = Date.now();
-    overlay.addEventListener("click", (e) => {
-        if (e.target === overlay && Date.now() - openTime > 400) {
-            overlay.remove();
-            activePluginInstance?.resetSelectionState();
-        }
-    });
-
-    textarea.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-            e.preventDefault();
-            doSubmit();
-        }
-        if (e.key === "Escape") {
-            overlay.remove();
-            activePluginInstance?.resetSelectionState();
-        }
-    });
-
-    document.body.appendChild(overlay);
-    setTimeout(() => textarea.focus(), 80);
-}
-
-/**
- * 2. 查看/编辑/删除批注详情弹窗
- */
-function openAnnotationManageModal(app, originalText, comment, editorView) {
-    closeAllCriticModals();
-
-    const overlay = document.createElement("div");
-    overlay.className = "criticflow-modal-overlay";
-    overlay.style.cssText = `
-        position: fixed;
-        top: 0; left: 0; width: 100vw; height: 100vh;
-        background-color: rgba(0, 0, 0, 0.75);
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-        z-index: 99999999;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 16px;
-        box-sizing: border-box;
-    `;
-
-    const modal = document.createElement("div");
-    modal.className = "criticflow-modal-card";
-    modal.style.cssText = `
-        width: 100%;
-        max-width: 440px;
-        background-color: #18181b;
-        border: 1px solid rgba(255, 255, 255, 0.22);
-        border-radius: 14px;
-        box-shadow: 0 24px 50px rgba(0, 0, 0, 0.8);
-        padding: 20px;
-        color: #ffffff;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        box-sizing: border-box;
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-    `;
-
-    const title = document.createElement("div");
-    title.style.cssText = "font-size: 16px; font-weight: 700; color: #f4f4f5; display: flex; align-items: center; gap: 6px;";
-    title.innerHTML = `<span>💬</span><span>批注详情</span>`;
-    modal.appendChild(title);
-
-    const quoteBox = document.createElement("div");
-    quoteBox.style.cssText = `
-        padding: 8px 12px;
-        border-radius: 8px;
-        background: rgba(234, 179, 8, 0.18);
-        border-left: 3px solid #eab308;
-        color: #fef08a;
-        font-size: 13px;
-        line-height: 1.4;
-        word-break: break-word;
-        max-height: 80px;
-        overflow-y: auto;
-    `;
-    quoteBox.textContent = `“${originalText}”`;
-    modal.appendChild(quoteBox);
-
-    const textarea = document.createElement("textarea");
-    textarea.value = comment;
-    textarea.style.cssText = `
-        width: 100%;
-        height: 85px;
-        padding: 10px;
-        border-radius: 8px;
-        background: #27272a;
-        border: 1px solid rgba(255, 255, 255, 0.15);
-        color: #ffffff;
-        font-size: 14px;
-        line-height: 1.4;
-        box-sizing: border-box;
-        resize: none;
-        outline: none;
-    `;
-    modal.appendChild(textarea);
-
-    const footer = document.createElement("div");
-    footer.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-top: 4px; gap: 8px;";
-
-    const deleteBtn = document.createElement("button");
-    deleteBtn.textContent = "🗑️ 删除此批注";
-    deleteBtn.style.cssText = `
-        padding: 8px 12px;
-        border-radius: 8px;
-        background: rgba(239, 68, 68, 0.2);
-        border: 1px solid rgba(239, 68, 68, 0.4);
-        color: #f87171;
-        font-size: 13px;
-        font-weight: 600;
-        cursor: pointer;
-    `;
-
-    const rightGroup = document.createElement("div");
-    rightGroup.style.cssText = "display: flex; gap: 8px;";
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.textContent = "取消";
-    cancelBtn.style.cssText = `
-        padding: 8px 14px;
-        border-radius: 8px;
-        background: #3f3f46;
-        border: none;
-        color: #e4e4e7;
-        font-size: 13px;
-        font-weight: 600;
-        cursor: pointer;
-    `;
-    cancelBtn.onclick = () => overlay.remove();
-
-    const saveBtn = document.createElement("button");
-    saveBtn.textContent = "保存修改";
-    saveBtn.style.cssText = `
-        padding: 8px 16px;
-        border-radius: 8px;
-        background: linear-gradient(135deg, #eab308, #ca8a04);
-        border: none;
-        color: #18181b;
-        font-size: 13px;
-        font-weight: 700;
-        cursor: pointer;
-    `;
-
-    const updateDoc = async (newCommentOrNull) => {
-        const cleanOrig = originalText.trim();
-        const cleanComm = comment.trim();
-
-        if (editorView) {
-            const fullDoc = editorView.state.doc.toString();
-            const safeOrig = escapeRegExp(cleanOrig);
-            const safeOldComm = escapeRegExp(cleanComm);
-
-            let pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>\\s*${safeOldComm}\\s*<<\\}`, "g");
-            let match = pattern.exec(fullDoc);
-
-            if (!match) {
-                pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`, "g");
-                match = pattern.exec(fullDoc);
-            }
-
-            if (!match) {
-                const words = cleanOrig.split(/\s+/).map(escapeRegExp).join("\\s+");
-                pattern = new RegExp(`\\{==\\s*${words}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`, "g");
-                match = pattern.exec(fullDoc);
-            }
-
-            if (match) {
-                const from = match.index;
-                const to = from + match[0].length;
-                const replacement = newCommentOrNull === null ? cleanOrig : `{==${cleanOrig}==}{>>${newCommentOrNull.trim()}<<}`;
-                editorView.dispatch({ changes: { from, to, insert: replacement } });
-            }
-        } else {
-            const ctx = resolveActiveContext(app);
-            if (ctx.file) {
-                try {
-                    const file = ctx.file;
-                    const fullDoc = await app.vault.read(file);
-                    const safeOrig = escapeRegExp(cleanOrig);
-                    const safeOldComm = escapeRegExp(cleanComm);
-
-                    let pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>\\s*${safeOldComm}\\s*<<\\}`);
-                    if (!pattern.test(fullDoc)) {
-                        pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`);
-                    }
-                    if (!pattern.test(fullDoc)) {
-                        const words = cleanOrig.split(/\s+/).map(escapeRegExp).join("\\s+");
-                        pattern = new RegExp(`\\{==\\s*${words}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`);
-                    }
-
-                    if (pattern.test(fullDoc)) {
-                        const replacement = newCommentOrNull === null ? cleanOrig : `{==${cleanOrig}==}{>>${newCommentOrNull.trim()}<<}`;
-                        await app.vault.modify(file, fullDoc.replace(pattern, replacement));
-                        if (ctx.view) {
-                            if (ctx.view.leaf && ctx.view.leaf.rebuildView) {
-                                ctx.view.leaf.rebuildView();
-                            } else if (ctx.view.previewMode && ctx.view.previewMode.rerender) {
-                                ctx.view.previewMode.rerender(true);
-                            }
-                        }
-                    }
-                } catch (err) {
-                    console.error("CriticFlow update file error:", err);
-                }
-            }
-        }
-
-        overlay.remove();
-        new obsidian_1.Notice(newCommentOrNull === null ? "✅ 已删除批注并还原原文！" : "✅ 批注已修改并保存！");
-    };
-
-    deleteBtn.onclick = () => safeRunAction(() => updateDoc(null));
-    saveBtn.onclick = () => {
-        const val = textarea.value.trim();
-        if (!val) {
-            new obsidian_1.Notice("批注内容不能为空");
-            return;
-        }
-        safeRunAction(() => updateDoc(val));
-    };
-
-    footer.appendChild(deleteBtn);
-    rightGroup.appendChild(cancelBtn);
-    rightGroup.appendChild(saveBtn);
-    footer.appendChild(rightGroup);
-    modal.appendChild(footer);
-    overlay.appendChild(modal);
-
-    const openTime = Date.now();
-    overlay.addEventListener("click", (e) => {
-        if (e.target === overlay && Date.now() - openTime > 400) {
-            overlay.remove();
-        }
-    });
-
-    textarea.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-            e.preventDefault();
-            saveBtn.click();
-        }
-        if (e.key === "Escape") {
-            overlay.remove();
-        }
-    });
-
-    document.body.appendChild(overlay);
-    setTimeout(() => textarea.focus(), 80);
-}
-
-// ==========================================
-// 3. CodeMirror 6 Visual Widget (Live Preview)
-// ==========================================
-class CriticBadgeWidget extends view_1.WidgetType {
-    constructor(original, comment) {
-        super();
-        this.original = original;
-        this.comment = comment;
-    }
-    eq(other) {
-        return this.original === other.original && this.comment === other.comment;
-    }
-    toDOM(view) {
-        const badge = document.createElement("span");
-        badge.className = "cm-critic-badge";
-        badge.innerHTML = `💬 <span>${escapeHtml(this.comment)}</span>`;
-        badge.title = `批注：${this.comment} (点击查看或删除)`;
-
-        const handleOpen = (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            if (activePluginInstance) {
-                safeRunAction(() => {
-                    openAnnotationManageModal(
-                        activePluginInstance.app,
-                        this.original,
-                        this.comment,
-                        view
-                    );
-                });
-            }
-        };
-
-        badge.addEventListener("click", handleOpen);
-        badge.addEventListener("touchend", handleOpen);
-
-        return badge;
-    }
-    ignoreEvent(e) {
-        return e.type === "click" || e.type === "touchend" || e.type === "mousedown";
-    }
-}
-
-// ==========================================
-// 4. Main Plugin Class (v1.1.2)
-// ==========================================
-class CriticMarkupPlugin extends obsidian_1.Plugin {
-    constructor() {
-        super(...arguments);
-        this.settings = DEFAULT_SETTINGS;
-        this.floatingBtn = null;
-        this.activeSelectedText = "";
-        this.savedEditorRange = null;
-        this.updatePending = false;
-    }
-    async onload() {
-        activePluginInstance = this;
-        await this.loadSettings();
-
-        // 1. CM6 Extension for Live Preview
-        this.registerEditorExtension(this.buildEditorExtension());
-
-        // 2. Reading View PostProcessor
-        this.registerReadingViewProcessor();
-
-        // 3. Floating Toolbar (Desktop Floating + Mobile Bottom Dock)
-        this.setupFloatingToolbar();
-
-        // 4. Commands
-        this.registerPluginCommands();
-    }
-
-    resetSelectionState() {
-        this.activeSelectedText = "";
-        this.savedEditorRange = null;
-        if (this.floatingBtn) {
-            this.floatingBtn.style.display = "none";
-        }
-    }
-
-    buildEditorExtension() {
-        const criticMatcher = new view_1.MatchDecorator({
-            regexp: /\{==([^=\n]+?)==\}\{>>([^>\n]+?)<<\}/g,
-            decorate: (add, from, to, match) => {
-                if (!this.settings.foldEnabled) return;
-                const orig = match[1];
-                const comm = match[2];
-                const origStart = from + 3;
-                const origEnd = origStart + orig.length;
-
-                add(from, origStart, view_1.Decoration.replace({}));
-                add(origStart, origEnd, view_1.Decoration.mark({ class: "cm-critic-highlight" }));
-                add(
-                    origEnd,
-                    to,
-                    view_1.Decoration.replace({
-                        widget: new CriticBadgeWidget(orig, comm),
-                    })
-                );
-            },
+          }
+          openAnnotationManageModal(app, this.original, this.comment, target);
         });
-
-        return view_1.ViewPlugin.define(
-            (view) => ({
-                decorations: criticMatcher.createDeco(view),
-                update(u) {
-                    this.decorations = activePluginInstance?.settings.foldEnabled
-                        ? criticMatcher.updateDeco(u, this.decorations)
-                        : view_1.Decoration.none;
-                },
-            }),
-            {
-                decorations: (v) => v.decorations,
-            }
+      }
+    };
+    badge.addEventListener("click", handleOpen);
+    badge.addEventListener("touchend", handleOpen);
+    return badge;
+  }
+  ignoreEvent(e) {
+    return e.type === "click" || e.type === "touchend" || e.type === "mousedown";
+  }
+};
+var CriticMarkupPlugin = class extends import_obsidian2.Plugin {
+  constructor() {
+    super(...arguments);
+    this.settings = DEFAULT_SETTINGS;
+    this.floatingBtn = null;
+    this.activeSelectedText = "";
+    this.savedAddition = null;
+    this.updatePending = false;
+  }
+  async onload() {
+    activePluginInstance = this;
+    await this.loadSettings();
+    this.registerEditorExtension(this.buildEditorExtension());
+    this.registerReadingViewProcessor();
+    this.setupFloatingToolbar();
+    this.registerPluginCommands();
+  }
+  resetSelectionState() {
+    this.activeSelectedText = "";
+    this.savedAddition = null;
+    if (this.floatingBtn) {
+      this.floatingBtn.style.display = "none";
+    }
+  }
+  buildEditorExtension() {
+    const decorate = (text) => {
+      if (!this.settings.foldEnabled) return import_view.Decoration.none;
+      const ranges = [];
+      for (const match of text.matchAll(markupPattern())) {
+        const from = match.index, origEnd = from + 3 + match[1].length;
+        ranges.push(import_view.Decoration.replace({}).range(from, from + 3));
+        if (origEnd > from + 3) ranges.push(import_view.Decoration.mark({ class: "cm-critic-highlight" }).range(from + 3, origEnd));
+        ranges.push(import_view.Decoration.replace({ widget: new CriticBadgeWidget(match[1], match[2]) }).range(origEnd, from + match[0].length));
+      }
+      return import_view.Decoration.set(ranges, true);
+    };
+    return import_state.StateField.define({
+      create: (state) => decorate(state.doc.toString()),
+      update: (value, transaction) => transaction.docChanged || transaction.reconfigured ? decorate(transaction.state.doc.toString()) : value,
+      provide: (field) => import_view.EditorView.decorations.from(field)
+    });
+  }
+  registerReadingViewProcessor() {
+    this.registerMarkdownPostProcessor(async (element, context) => {
+      if (!this.settings.foldEnabled) return;
+      const file = this.app.vault.getAbstractFileByPath(context.sourcePath);
+      if (!(file instanceof import_obsidian2.TFile)) return;
+      try {
+        const section = context.getSectionInfo(element);
+        const snapshot = await this.app.vault.read(file);
+        if (activePluginInstance !== this || !this.settings.foldEnabled) return;
+        let bounds = null;
+        if (section) {
+          const lines = snapshot.split("\n");
+          const offset = (line) => lines.slice(0, line).reduce((sum, s) => sum + s.length + 1, 0);
+          bounds = { from: offset(section.lineStart), to: Math.min(snapshot.length, offset(section.lineEnd + 1)) };
+        }
+        renderReadingAnnotations(
+          element,
+          { file, path: file.path, snapshot },
+          bounds,
+          (original, comment, target) => openAnnotationManageModal(this.app, original, comment, target)
         );
-    }
-
-    registerReadingViewProcessor() {
-        this.registerMarkdownPostProcessor((element) => {
-            if (!this.settings.foldEnabled) return;
-
-            const blocks = element.querySelectorAll("p, li, h1, h2, h3, h4, h5, h6, blockquote, div.markdown-preview-section");
-            const targets = blocks.length > 0 ? Array.from(blocks) : [element];
-
-            for (const block of targets) {
-                let html = block.innerHTML;
-                if (!html.includes("{") || (!html.includes(">>") && !html.includes("&gt;&gt;"))) {
-                    continue;
-                }
-
-                const criticRegex =
-                    /\{(?:==|<mark[^>]*>)([\s\S]*?)(?:==|<\/mark>)\}\{(?:>>|&gt;&gt;)([\s\S]*?)(?:<<|&lt;&lt;)\}/g;
-
-                if (criticRegex.test(html)) {
-                    criticRegex.lastIndex = 0;
-                    const newHtml = html.replace(criticRegex, (m, orig, comm) => {
-                        const cleanOrig = orig.replace(/<[^>]+>/g, "").trim();
-                        const cleanComm = comm.replace(/<[^>]+>/g, "").trim();
-                        return `<span class="cm-critic-highlight">${escapeHtml(
-                            cleanOrig
-                        )}</span><span class="cm-critic-badge" data-orig="${encodeURIComponent(
-                            cleanOrig
-                        )}" data-comm="${encodeURIComponent(
-                            cleanComm
-                        )}">💬 <span>${escapeHtml(cleanComm)}</span></span>`;
-                    });
-
-                    block.innerHTML = newHtml;
-
-                    const badges = block.querySelectorAll(".cm-critic-badge");
-                    badges.forEach((badge) => {
-                        const origText = decodeURIComponent(badge.getAttribute("data-orig") || "");
-                        const commText = decodeURIComponent(badge.getAttribute("data-comm") || "");
-
-                        const handleBadgeAction = (e) => {
-                            e.stopPropagation();
-                            e.preventDefault();
-                            safeRunAction(() => {
-                                openAnnotationManageModal(this.app, origText, commText);
-                            });
-                        };
-
-                        badge.addEventListener("click", handleBadgeAction);
-                        badge.addEventListener("touchend", handleBadgeAction);
-                    });
-                }
-            }
-        });
-    }
-
-    setupFloatingToolbar() {
-        this.floatingBtn = document.createElement("div");
-        this.floatingBtn.id = "obsidian-floating-annotate-btn";
-        this.floatingBtn.innerHTML = `<span style="color:#eab308;font-size:15px;">✍️</span><span>添加划词批注</span>`;
-        document.body.appendChild(this.floatingBtn);
-
-        const scheduleUpdate = () => {
-            if (this.updatePending) return;
-            this.updatePending = true;
-            requestAnimationFrame(() => {
-                this.updatePending = false;
-                this.updateFloatingButton();
-            });
-        };
-
-        this.registerDomEvent(document, "selectionchange", scheduleUpdate);
-        this.registerDomEvent(document, "mouseup", () => setTimeout(scheduleUpdate, 60));
-        this.registerDomEvent(document, "touchend", () => setTimeout(scheduleUpdate, 140));
-
-        const triggerAnnotation = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-
-            if (!this.activeSelectedText) {
-                this.hideFloatingBtn();
-                return;
-            }
-
-            const txt = this.activeSelectedText;
-            const savedRange = this.savedEditorRange;
-            this.hideFloatingBtn();
-
-            safeRunAction(() => {
-                openAddAnnotationModal(this.app, txt, savedRange || undefined);
-            });
-        };
-
-        this.floatingBtn.addEventListener("mousedown", triggerAnnotation);
-        this.floatingBtn.addEventListener("touchend", triggerAnnotation);
-    }
-
-    updateFloatingButton() {
-        let text = "";
-        this.savedEditorRange = null;
-
-        const ctx = resolveActiveContext(this.app);
-        if (ctx.editor) {
-            text = ctx.editor.getSelection().trim();
-            if (text) {
-                this.savedEditorRange = {
-                    from: ctx.editor.getCursor("from"),
-                    to: ctx.editor.getCursor("to"),
-                };
-            }
-        }
-
-        const domSel = window.getSelection();
-        if (!text && domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-            text = domSel.toString().trim();
-        }
-
-        if (!text || text.length === 0) {
-            this.hideFloatingBtn();
-            return;
-        }
-
-        this.activeSelectedText = text;
-
-        if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-            const range = domSel.getRangeAt(0);
-            const rect = range.getBoundingClientRect();
-            if (rect && (rect.width > 0 || rect.height > 0)) {
-                const mobile = isMobileDevice();
-
-                if (this.floatingBtn) {
-                    if (mobile) {
-                        // MOBILE: Dock strictly to BOTTOM of viewport (0% Overlap with iOS Copy/Share Callout Menu!)
-                        this.floatingBtn.classList.add("is-mobile-dock");
-                        this.floatingBtn.style.top = "";
-                        this.floatingBtn.style.left = "";
-                    } else {
-                        // DESKTOP: Traditional cursor-following floating pill
-                        this.floatingBtn.classList.remove("is-mobile-dock");
-                        let top = rect.top - 42;
-                        if (top < 12) top = rect.bottom + 10;
-                        let left = Math.max(12, Math.min(window.innerWidth - 95, rect.left + rect.width / 2 - 40));
-                        this.floatingBtn.style.top = `${top}px`;
-                        this.floatingBtn.style.left = `${left}px`;
-                    }
-                    this.floatingBtn.style.display = "inline-flex";
-                }
-                return;
-            }
-        }
-
+      } catch (err) {
+        console.warn("CriticFlow reading renderer:", err);
+      }
+    });
+  }
+  setupFloatingToolbar() {
+    this.floatingBtn = document.createElement("div");
+    this.floatingBtn.id = "obsidian-floating-annotate-btn";
+    this.floatingBtn.innerHTML = `<span style="color:#eab308;font-size:15px;">\u270D\uFE0F</span><span>\u6DFB\u52A0\u5212\u8BCD\u6279\u6CE8</span>`;
+    document.body.appendChild(this.floatingBtn);
+    const scheduleUpdate = () => {
+      if (this.updatePending) return;
+      this.updatePending = true;
+      requestAnimationFrame(() => {
+        this.updatePending = false;
+        this.updateFloatingButton();
+      });
+    };
+    this.registerDomEvent(document, "selectionchange", scheduleUpdate);
+    this.registerDomEvent(document, "mouseup", () => setTimeout(scheduleUpdate, 60));
+    this.registerDomEvent(document, "touchend", () => setTimeout(scheduleUpdate, 140));
+    const triggerAnnotation = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!this.activeSelectedText) {
         this.hideFloatingBtn();
+        return;
+      }
+      const addition = captureAddition(this.app) || this.savedAddition;
+      this.hideFloatingBtn();
+      if (!addition) return;
+      safeRunAction(() => openAddAnnotationModal(this.app, addition.text, addition.target));
+    };
+    this.floatingBtn.addEventListener("mousedown", triggerAnnotation);
+    this.floatingBtn.addEventListener("touchend", triggerAnnotation);
+  }
+  updateFloatingButton() {
+    var _a;
+    if (document.querySelector(".criticflow-modal-overlay")) return;
+    this.savedAddition = captureAddition(this.app);
+    const text = ((_a = this.savedAddition) == null ? void 0 : _a.text) || "";
+    const domSel = window.getSelection();
+    if (!text || text.length === 0) {
+      this.hideFloatingBtn();
+      return;
     }
-
-    hideFloatingBtn() {
+    this.activeSelectedText = text;
+    if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
+      const range = domSel.getRangeAt(0);
+      const rect = range.getBoundingClientRect();
+      if (rect && (rect.width > 0 || rect.height > 0)) {
+        const mobile = isMobileDevice();
         if (this.floatingBtn) {
-            this.floatingBtn.style.display = "none";
+          if (mobile) {
+            this.floatingBtn.classList.add("is-mobile-dock");
+            this.floatingBtn.style.top = "";
+            this.floatingBtn.style.left = "";
+          } else {
+            this.floatingBtn.classList.remove("is-mobile-dock");
+            let top = rect.top - 42;
+            if (top < 12) top = rect.bottom + 10;
+            let left = Math.max(12, Math.min(window.innerWidth - 95, rect.left + rect.width / 2 - 40));
+            this.floatingBtn.style.top = `${top}px`;
+            this.floatingBtn.style.left = `${left}px`;
+          }
+          this.floatingBtn.style.display = "inline-flex";
         }
+        return;
+      }
     }
-
-    registerPluginCommands() {
-        this.addCommand({
-            id: "criticmarkup-add-annotation",
-            name: "添加划词批注 (Add Annotation)",
-            callback: () => {
-                let selection = "";
-                let savedRange = undefined;
-
-                const ctx = resolveActiveContext(this.app);
-                if (ctx.editor) {
-                    selection = ctx.editor.getSelection().trim();
-                    if (selection) {
-                        savedRange = {
-                            from: ctx.editor.getCursor("from"),
-                            to: ctx.editor.getCursor("to"),
-                        };
-                    }
-                }
-                if (!selection) {
-                    const domSel = window.getSelection();
-                    if (domSel && !domSel.isCollapsed) {
-                        selection = domSel.toString().trim();
-                    }
-                }
-
-                if (!selection) {
-                    new obsidian_1.Notice("请先划选要批注的一段文字");
-                    return;
-                }
-
-                openAddAnnotationModal(this.app, selection, savedRange);
-            },
-            hotkeys: [{ modifiers: ["Mod", "Shift"], key: "c" }],
-        });
-
-        this.addCommand({
-            id: "criticmarkup-extract-annotations",
-            name: "一键提取全文档批注为 Agent 指令 (Extract for Agent)",
-            callback: async () => {
-                const ctx = resolveActiveContext(this.app);
-                let content = "";
-                if (ctx.editor) {
-                    content = ctx.editor.getValue();
-                } else if (ctx.file) {
-                    content = await this.app.vault.read(ctx.file);
-                }
-
-                if (!content) {
-                    new obsidian_1.Notice("当前文档为空");
-                    return;
-                }
-
-                const regex = /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}/g;
-                const matches = [];
-                let match;
-
-                while ((match = regex.exec(content)) !== null) {
-                    if (match[1] && match[2]) {
-                        matches.push({ text: match[1].trim(), comment: match[2].trim() });
-                    } else if (match[3]) {
-                        matches.push({ text: "(上下文)", comment: match[3].trim() });
-                    }
-                }
-
-                if (matches.length === 0) {
-                    new obsidian_1.Notice("ℹ️ 当前文档暂无批注");
-                    return;
-                }
-
-                let report = `# 文档审阅与修改要求 (来自批注)\n\n`;
-                report += `本文档共包含 **${matches.length}** 条审阅修改意见：\n\n`;
-                matches.forEach((item, index) => {
-                    report += `### 批注 ${index + 1}\n`;
-                    report += `- **原文位置**：\`${item.text}\`\n`;
-                    report += `- **修改批注**：${item.comment}\n\n`;
-                });
-                report += `请严格根据上述批注修改对应文件并保存，保持其他无关内容不变。\n`;
-
-                await navigator.clipboard.writeText(report);
-                new obsidian_1.Notice(`✅ 已将全部 ${matches.length} 条批注复制到剪贴板！可以直接发给 AI Agent。`);
-            },
-            hotkeys: [{ modifiers: ["Mod", "Shift"], key: "e" }],
-        });
-
-        this.addCommand({
-            id: "criticmarkup-toggle-fold",
-            name: "切换便签折叠视图 / 源码视图 (Toggle View)",
-            callback: () => {
-                this.settings.foldEnabled = !this.settings.foldEnabled;
-                this.saveSettings();
-                new obsidian_1.Notice(
-                    this.settings.foldEnabled
-                        ? "👁️ 已开启便签折叠预览"
-                        : "📝 已切换至纯文本源码视图"
-                );
-                this.app.workspace.updateOptions();
-            },
-            hotkeys: [{ modifiers: ["Alt", "Shift"], key: "c" }],
-        });
+    this.hideFloatingBtn();
+  }
+  hideFloatingBtn() {
+    if (this.floatingBtn) {
+      this.floatingBtn.style.display = "none";
     }
-
-    onunload() {
-        activePluginInstance = null;
-        closeAllCriticModals();
-        if (this.floatingBtn) {
-            this.floatingBtn.remove();
-            this.floatingBtn = null;
+  }
+  registerPluginCommands() {
+    this.addCommand({
+      id: "criticmarkup-add-annotation",
+      name: "\u6DFB\u52A0\u5212\u8BCD\u6279\u6CE8 (Add Annotation)",
+      callback: () => {
+        const addition = captureAddition(this.app);
+        if (!addition) {
+          new import_obsidian2.Notice("\u8BF7\u5148\u5728\u76EE\u6807\u6587\u6863\u5212\u9009\u8981\u6279\u6CE8\u7684\u6587\u5B57");
+          return;
         }
-    }
+        openAddAnnotationModal(this.app, addition.text, addition.target);
+      },
+      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "c" }]
+    });
+    this.addCommand({
+      id: "criticmarkup-extract-annotations",
+      name: "\u4E00\u952E\u63D0\u53D6\u5168\u6587\u6863\u6279\u6CE8\u4E3A Agent \u6307\u4EE4 (Extract for Agent)",
+      callback: async () => {
+        const ctx = resolveActiveContext(this.app);
+        let content = "";
+        if (ctx.editor) {
+          content = ctx.editor.getValue();
+        } else if (ctx.file) {
+          content = await this.app.vault.read(ctx.file);
+        }
+        if (!content) {
+          new import_obsidian2.Notice("\u5F53\u524D\u6587\u6863\u4E3A\u7A7A");
+          return;
+        }
+        const regex = /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}/g;
+        const matches = [];
+        let match;
+        while ((match = regex.exec(content)) !== null) {
+          if (match[1] && match[2]) {
+            matches.push({ text: match[1].trim(), comment: match[2].trim() });
+          } else if (match[3]) {
+            matches.push({ text: "(\u4E0A\u4E0B\u6587)", comment: match[3].trim() });
+          }
+        }
+        if (matches.length === 0) {
+          new import_obsidian2.Notice("\u2139\uFE0F \u5F53\u524D\u6587\u6863\u6682\u65E0\u6279\u6CE8");
+          return;
+        }
+        let report = `# \u6587\u6863\u5BA1\u9605\u4E0E\u4FEE\u6539\u8981\u6C42 (\u6765\u81EA\u6279\u6CE8)
 
-    async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-    }
+`;
+        report += `\u672C\u6587\u6863\u5171\u5305\u542B **${matches.length}** \u6761\u5BA1\u9605\u4FEE\u6539\u610F\u89C1\uFF1A
 
-    async saveSettings() {
-        await this.saveData(this.settings);
-    }
-}
+`;
+        matches.forEach((item, index) => {
+          report += `### \u6279\u6CE8 ${index + 1}
+`;
+          report += `- **\u539F\u6587\u4F4D\u7F6E**\uFF1A\`${item.text}\`
+`;
+          report += `- **\u4FEE\u6539\u6279\u6CE8**\uFF1A${item.comment}
 
-exports.default = CriticMarkupPlugin;
-module.exports = CriticMarkupPlugin;
-module.exports.default = CriticMarkupPlugin;
+`;
+        });
+        report += `\u8BF7\u4E25\u683C\u6839\u636E\u4E0A\u8FF0\u6279\u6CE8\u4FEE\u6539\u5BF9\u5E94\u6587\u4EF6\u5E76\u4FDD\u5B58\uFF0C\u4FDD\u6301\u5176\u4ED6\u65E0\u5173\u5185\u5BB9\u4E0D\u53D8\u3002
+`;
+        await navigator.clipboard.writeText(report);
+        new import_obsidian2.Notice(`\u2705 \u5DF2\u5C06\u5168\u90E8 ${matches.length} \u6761\u6279\u6CE8\u590D\u5236\u5230\u526A\u8D34\u677F\uFF01\u53EF\u4EE5\u76F4\u63A5\u53D1\u7ED9 AI Agent\u3002`);
+      },
+      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "e" }]
+    });
+    this.addCommand({
+      id: "criticmarkup-toggle-fold",
+      name: "\u5207\u6362\u4FBF\u7B7E\u6298\u53E0\u89C6\u56FE / \u6E90\u7801\u89C6\u56FE (Toggle View)",
+      callback: () => {
+        this.settings.foldEnabled = !this.settings.foldEnabled;
+        this.saveSettings();
+        new import_obsidian2.Notice(
+          this.settings.foldEnabled ? "\u{1F441}\uFE0F \u5DF2\u5F00\u542F\u4FBF\u7B7E\u6298\u53E0\u9884\u89C8" : "\u{1F4DD} \u5DF2\u5207\u6362\u81F3\u7EAF\u6587\u672C\u6E90\u7801\u89C6\u56FE"
+        );
+        this.app.workspace.updateOptions();
+      },
+      hotkeys: [{ modifiers: ["Alt", "Shift"], key: "c" }]
+    });
+  }
+  onunload() {
+    activePluginInstance = null;
+    closeAllCriticModals();
+    if (this.floatingBtn) {
+      this.floatingBtn.remove();
+      this.floatingBtn = null;
+    }
+  }
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+};

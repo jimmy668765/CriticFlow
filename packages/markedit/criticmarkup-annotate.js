@@ -5,7 +5,7 @@
  * 
  * 功能特性：
  * 1. 鼠标拉选即浮现工具栏：鼠标划选文字后，选区上方自动浮现【📝 批注】小胶囊，点击直接批注；
- * 2. 所见即所得折叠：利用 CodeMirror 6 原生 MatchDecorator 与 WidgetType 将 {==选区==}{>>批注<<}
+ * 2. 所见即所得折叠：利用 CodeMirror 6 原生 StateField 与 WidgetType 将 {==选区==}{>>批注<<}
  *    折叠为金色荧光高亮正文 + 词尾胶囊便签 💬 批注内容；
  * 3. 便签点击卡片管理：点击任何已有批注气泡，弹出详情卡片，支持【🗑️ 删除批注】还原原文或【保存修改】更新批注；
  * 4. 快捷键支持：
@@ -16,8 +16,12 @@
  */
 
 (function () {
+  // A legacy editor.js and scripts/ copy may both be loaded by MarkEdit.
+  if (window.__criticflowAnnotationLoaded) return;
+  window.__criticflowAnnotationLoaded = true;
   const isMac = navigator.platform.toUpperCase().indexOf("MAC") >= 0;
   let isFoldEnabled = true;
+  let closeActiveModal = null;
 
   // 1. Inject Styles
   const existingStyle = document.getElementById("markedit-criticmarkup-styles");
@@ -103,6 +107,14 @@
            (window.editor && window.editor.editorView) ||
            window.editorView ||
            window.editor;
+  }
+
+  async function persistDocument(view, doc) {
+    if (getEditorView() !== view || view.state.doc !== doc) throw new Error("文档已切换或变化，请在原文档按 ⌘S 保存");
+    if (typeof window.MarkEdit?.saveDocument !== "function") throw new Error("宿主不支持自动保存，请按 ⌘S 保存");
+    // Verified against MarkEdit CoreEditor/src/api/methods.ts: Promise<boolean>.
+    if (await window.MarkEdit.saveDocument() !== true) throw new Error("保存未完成；编辑内容仍在原编辑器，可重试保存或按 ⌘S");
+    if (getEditorView() !== view || view.state.doc !== doc) throw new Error("保存期间文档发生变化，无法确认最新内容已保存；请在原文档按 ⌘S");
   }
 
   // Toast notification
@@ -227,6 +239,10 @@
 
   // 3. Inline Annotation Dialog (新建批注弹窗)
   function showAnnotationDialog(selectedText) {
+    closeActiveModal?.();
+    const boundView = getEditorView();
+    const boundDoc = boundView?.state.doc;
+    const boundSelection = boundView?.state.selection.main;
     floatingBtn.style.display = "none";
     const existing = document.getElementById("markedit-critic-modal");
     if (existing) existing.remove();
@@ -289,7 +305,9 @@
     const closeModal = () => {
       overlay.remove();
       window.removeEventListener("keydown", onGlobalKey, true);
+      if (closeActiveModal === closeModal) closeActiveModal = null;
     };
+    closeActiveModal = closeModal;
 
     closeBtn.onclick = closeModal;
 
@@ -367,15 +385,21 @@
       boxShadow: "0 2px 8px rgba(234, 179, 8, 0.35)",
     });
 
-    const doSubmit = () => {
+    let saving = false, pendingDoc = null;
+    const doSubmit = async () => {
+      if (saving) return;
       const comment = textarea.value.trim();
-      if (!comment) {
-        showToast("请输入批注内容");
-        textarea.focus();
-        return;
-      }
-      closeModal();
-      applyCriticMarkup(selectedText, comment);
+      if (!comment) { showToast("请输入批注内容"); textarea.focus(); return; }
+      saving = true; btnSubmit.disabled = true;
+      try {
+        if (!pendingDoc) {
+          if (!applyCriticMarkup(selectedText, comment, boundView, boundDoc, boundSelection)) return;
+          pendingDoc = boundView.state.doc; textarea.disabled = true;
+        }
+        await persistDocument(boundView, pendingDoc);
+        showToast("✅ 批注已保存到原文件"); closeModal();
+      } catch (error) { showToast(String(error), 5000); btnSubmit.textContent = "重试保存"; }
+      finally { saving = false; btnSubmit.disabled = false; }
     };
 
     btnSubmit.onclick = doSubmit;
@@ -387,7 +411,7 @@
       } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         e.stopPropagation();
-        doSubmit();
+        if (!e.isComposing) void doSubmit();
       }
     };
     window.addEventListener("keydown", onGlobalKey, true);
@@ -410,91 +434,60 @@
   }
 
   // Replace selection via CodeMirror 6 EditorView dispatch
-  function applyCriticMarkup(text, comment) {
+  function applyCriticMarkup(text, comment, boundView, boundDoc, boundSelection) {
     const critic = `{==${text.trim()}==}{>>${comment.trim()}<<}`;
-    const view = getEditorView();
+    const view = boundView;
+    if (!view || getEditorView() !== view || view.state.doc !== boundDoc || !boundSelection ||
+        boundDoc.sliceString(boundSelection.from, boundSelection.to).trim() !== text.trim() ||
+        /\{==|==\}|\{>>|<<\}/.test(text + comment)) {
+      showToast("文档或选区已变化，未修改；请重新划选"); return false;
+    }
 
     if (view && view.state && view.state.selection) {
       try {
-        const mainSel = view.state.selection.main;
-        view.dispatch({
-          changes: { from: mainSel.from, to: mainSel.to, insert: critic },
-          selection: { anchor: mainSel.from + critic.length },
-        });
-
-        // Trigger auto save if supported
-        if (window.MarkEdit && typeof window.MarkEdit.saveDocument === "function") {
-          try { window.MarkEdit.saveDocument(); } catch {}
+        const raw = boundDoc.sliceString(boundSelection.from, boundSelection.to);
+        const from = boundSelection.from + raw.indexOf(text.trim());
+        if ([...boundDoc.toString().matchAll(/\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g)]
+            .some(m => from < m.index + m[0].length && from + text.trim().length > m.index)) {
+          showToast("选区位于已有批注中，请点击气泡编辑"); return false;
         }
-
-        showToast("✅ 已在文档原地插入批注！按 ⌘S 保存文件");
-        triggerLiveDecoration();
-        return;
+        view.dispatch({
+          changes: { from, to: from + text.trim().length, insert: critic },
+          selection: { anchor: from + critic.length },
+        });
+        return true;
       } catch (err) {
         console.warn("[MarkEdit Extension] view.dispatch error:", err);
       }
     }
 
-    // Fallback: document.execCommand
-    let replaced = false;
-    try {
-      replaced = document.execCommand("insertText", false, critic);
-    } catch {}
-
-    if (replaced) {
-      showToast("✅ 已在文档原地插入批注！按 ⌘S 保存文件");
-      triggerLiveDecoration();
-      return;
-    }
-
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(critic).then(() => {
-        showToast("⚠️ 已存入剪贴板，请按 ⌘V 粘贴到选区");
-      });
-    }
+    showToast("未能修改当前编辑器，批注未写入");
+    return false;
   }
 
   // Helper to update or delete annotation in document
-  function updateAnnotationInDoc(originalText, oldComment, newCommentOrNull) {
-    const view = getEditorView();
-    if (!view || !view.state) return false;
+  function updateAnnotationInDoc(originalText, oldComment, newCommentOrNull, target) {
+    const view = target?.view;
+    if (!view || getEditorView() !== view || view.state.doc !== target.doc) return false;
+    if (newCommentOrNull !== null && /\{==|==\}|\{>>|<<\}/.test(newCommentOrNull)) return false;
 
     const fullDoc = view.state.doc.toString();
-    const safeOrig = escapeRegExp(originalText.trim());
-    const safeOldComm = escapeRegExp(oldComment.trim());
-
-    // 1. Try exact/whitespace-flexible pattern: {==\s*original\s*==}{>>\s*oldComment\s*<<}
-    let pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>\\s*${safeOldComm}\\s*<<\\}`, "g");
-    let match = pattern.exec(fullDoc);
-
-    // 2. If not matched, try matching {==\s*original\s*==}{>>[\s\S]*?<<}
-    if (!match) {
-      pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`, "g");
-      match = pattern.exec(fullDoc);
-    }
-
-    // 3. If still not matched, try looser matching where originalText might have whitespace differences
-    if (!match) {
-      const looseOrigWords = originalText.trim().split(/\s+/).map(escapeRegExp).join("\\s+");
-      pattern = new RegExp(`\\{==\\s*${looseOrigWords}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`, "g");
-      match = pattern.exec(fullDoc);
-    }
+    const safeOrig = escapeRegExp(originalText);
+    const safeOldComm = escapeRegExp(oldComment);
+    const pattern = new RegExp(`\\{==${safeOrig}==\\}\\{>>${safeOldComm}<<\\}`, "g");
+    const matches = [...fullDoc.matchAll(pattern)];
+    const match = matches.find(m => m.index === target.from);
 
     if (match) {
       const from = match.index;
       const to = from + match[0].length;
       const replacement = newCommentOrNull === null
-        ? originalText.trim()
-        : `{==${originalText.trim()}==}{>>${newCommentOrNull.trim()}<<}`;
+        ? originalText
+        : `{==${originalText}==}{>>${newCommentOrNull.trim()}<<}`;
 
       view.dispatch({
         changes: { from, to, insert: replacement }
       });
-
-      // Trigger auto save if supported
-      if (window.MarkEdit && typeof window.MarkEdit.saveDocument === "function") {
-        try { window.MarkEdit.saveDocument(); } catch {}
-      }
 
       return true;
     }
@@ -502,7 +495,8 @@
   }
 
   // 4. Badge Click Modal (查看/编辑/删除已有批注)
-  function showBadgeManagementModal(originalText, comment) {
+  function showBadgeManagementModal(originalText, comment, target) {
+    closeActiveModal?.();
     const existing = document.getElementById("markedit-critic-detail-modal");
     if (existing) existing.remove();
 
@@ -542,7 +536,9 @@
     const closeModal = () => {
       overlay.remove();
       window.removeEventListener("keydown", onModalKey, true);
+      if (closeActiveModal === closeModal) closeActiveModal = null;
     };
+    closeActiveModal = closeModal;
 
     // Header
     const header = document.createElement("div");
@@ -644,36 +640,26 @@
       cursor: "pointer",
     });
 
-    // Delete handler
-    btnDelete.onclick = (e) => {
-      e.stopPropagation();
-      closeModal();
-      const success = updateAnnotationInDoc(originalText, comment, null);
-      if (success) {
-        showToast("✅ 已删除批注并还原原文！按 ⌘S 保存文件");
-        triggerLiveDecoration();
-      } else {
-        showToast("未定位到底层批注位置");
-      }
+    let saving = false, pendingDoc = null;
+    const commit = async (newComment) => {
+      if (saving) return;
+      saving = true; btnSave.disabled = btnDelete.disabled = true;
+      try {
+        if (!pendingDoc) {
+          if (!updateAnnotationInDoc(originalText, comment, newComment, target)) { showToast("文档、批注或位置已变化，未修改"); return; }
+          pendingDoc = target.view.state.doc; textarea.disabled = true;
+        }
+        await persistDocument(target.view, pendingDoc);
+        showToast("✅ 批注更改已保存到原文件"); closeModal();
+      } catch (error) { showToast(String(error), 5000); btnSave.textContent = "重试保存"; }
+      finally { saving = false; btnSave.disabled = false; btnDelete.disabled = !!pendingDoc; }
     };
-
-    // Save edit handler
-    btnSave.onclick = (e) => {
+    btnDelete.onclick = e => { e.stopPropagation(); void commit(null); };
+    btnSave.onclick = e => {
       e.stopPropagation();
-      const newComment = textarea.value.trim();
-      if (!newComment) {
-        showToast("批注内容不能为空");
-        textarea.focus();
-        return;
-      }
-      closeModal();
-      const success = updateAnnotationInDoc(originalText, comment, newComment);
-      if (success) {
-        showToast("✅ 批注已修改！按 ⌘S 保存文件");
-        triggerLiveDecoration();
-      } else {
-        showToast("未定位到底层批注位置");
-      }
+      const value = textarea.value.trim();
+      if (!pendingDoc && !value) { showToast("批注内容不能为空"); return; }
+      void commit(value);
     };
 
     btnCancel.onclick = (e) => {
@@ -692,7 +678,7 @@
         closeModal();
       } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
         e.stopPropagation();
-        btnSave.click();
+        if (!e.isComposing) btnSave.click();
       }
     };
     window.addEventListener("keydown", onModalKey, true);
@@ -724,11 +710,10 @@
                    (window.editor && window.editor.codemirror && window.editor.codemirror.view) ||
                    (window.require && window.require("@codemirror/view"));
 
-    if (!cmView || !cmView.MatchDecorator || !cmView.ViewPlugin || !cmView.WidgetType) {
-      return false;
-    }
-
-    const { WidgetType, Decoration, MatchDecorator, ViewPlugin } = cmView;
+    const cmState = window.MarkEdit?.codemirror?.state;
+    if (!cmView?.WidgetType || !cmState?.StateField) return false;
+    const { WidgetType, Decoration, EditorView } = cmView;
+    const { StateField } = cmState;
 
     class CriticBadgeWidget extends WidgetType {
       constructor(original, comment) {
@@ -742,12 +727,13 @@
       toDOM(view) {
         const badge = document.createElement("span");
         badge.className = "cm-critic-badge";
-        badge.innerHTML = `💬 <span>${escapeHtml(this.comment)}</span>`;
+        badge.innerHTML = `💬 <span>${escapeHtml(this.comment.length > 36 || this.comment.includes("\n") ? "查看批注" : this.comment)}</span>`;
         badge.title = `批注：${this.comment} (点击查看或删除)`;
         badge.addEventListener("click", (e) => {
           e.stopPropagation();
           e.preventDefault();
-          showBadgeManagementModal(this.original, this.comment);
+          const from = view.posAtDOM(badge) - this.original.length - 3;
+          showBadgeManagementModal(this.original, this.comment, { view, from, doc: view.state.doc });
         });
         return badge;
       }
@@ -757,39 +743,23 @@
       }
     }
 
-    const criticMatcher = new MatchDecorator({
-      regexp: /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g,
-      decorate: (add, from, to, match, view) => {
-        if (!isFoldEnabled) return;
-        const orig = match[1];
-        const comm = match[2];
-        const origStart = from + 3;
-        const origEnd = origStart + orig.length;
-
-        // 1. Hide {==
-        add(from, origStart, Decoration.replace({}));
-        // 2. Highlight original text
-        add(origStart, origEnd, Decoration.mark({ class: "cm-critic-highlight" }));
-        // 3. Replace ==}{>>comment<<} with badge widget
-        add(origEnd, to, Decoration.replace({
-          widget: new CriticBadgeWidget(orig, comm),
-        }));
-      },
-    });
-
-    const criticPlugin = ViewPlugin.define(
-      (view) => ({
-        decorations: criticMatcher.createDeco(view),
-        update(u) {
-          this.decorations = isFoldEnabled
-            ? criticMatcher.updateDeco(u, this.decorations)
-            : Decoration.none;
-        },
-      }),
-      {
-        decorations: (v) => v.decorations,
+    const decorate = text => {
+      if (!isFoldEnabled) return Decoration.none;
+      const ranges = [];
+      for (const match of text.matchAll(/\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g)) {
+        const from = match.index, origEnd = from + 3 + match[1].length;
+        ranges.push(Decoration.replace({}).range(from, from + 3));
+        if (origEnd > from + 3) ranges.push(Decoration.mark({ class: "cm-critic-highlight" }).range(from + 3, origEnd));
+        ranges.push(Decoration.replace({ widget: new CriticBadgeWidget(match[1], match[2]) }).range(origEnd, from + match[0].length));
       }
-    );
+      return Decoration.set(ranges, true);
+    };
+    const criticPlugin = StateField.define({
+      create: state => decorate(state.doc.toString()),
+      update: (value, tr) => tr.docChanged || tr.selection || tr.reconfigured || tr.effects.length
+        ? decorate(tr.state.doc.toString()) : value,
+      provide: field => EditorView.decorations.from(field),
+    });
 
     const addExt = (window.MarkEdit && window.MarkEdit.addExtension) ||
                    (window.editor && window.editor.addExtension);
@@ -804,45 +774,10 @@
     return false;
   }
 
-  // 6. Live DOM Fallback Decorator (针对未被 CodeMirror 插件接管的行进行兜底渲染)
+  // Native StateField owns rendering, including multiline comments. Never rewrite .cm-line DOM.
   function triggerLiveDecoration() {
-    if (!isFoldEnabled) return;
-
-    const lines = document.querySelectorAll(".cm-line");
-    const regex = /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g;
-
-    lines.forEach((line) => {
-      // If line already contains our native widget or is decorated, skip
-      if (line.querySelector(".cm-critic-badge")) return;
-      const text = line.textContent || "";
-      if (!text.includes("{==") || !text.includes("<<}")) return;
-
-      if (regex.test(text)) {
-        regex.lastIndex = 0;
-        let newHtml = "";
-        let lastIndex = 0;
-        let match;
-        while ((match = regex.exec(text)) !== null) {
-          newHtml += escapeHtml(text.slice(lastIndex, match.index));
-          const orig = match[1];
-          const comm = match[2];
-          newHtml += `<mark class="cm-critic-highlight">${escapeHtml(orig)}<span class="cm-critic-badge" data-original="${escapeHtml(orig)}" data-comment="${escapeHtml(comm)}" title="批注：${escapeHtml(comm)} (点击查看或删除)">💬 ${escapeHtml(comm)}</span></mark>`;
-          lastIndex = regex.lastIndex;
-        }
-        newHtml += escapeHtml(text.slice(lastIndex));
-        line.innerHTML = newHtml;
-
-        // Bind click on badge to open management modal
-        line.querySelectorAll(".cm-critic-badge").forEach((badge) => {
-          badge.addEventListener("click", (e) => {
-            e.stopPropagation();
-            const orig = badge.getAttribute("data-original") || "";
-            const comm = badge.getAttribute("data-comment") || "";
-            showBadgeManagementModal(orig, comm);
-          });
-        });
-      }
-    });
+    const view = getEditorView();
+    if (view?.state) view.dispatch({ selection: view.state.selection });
   }
 
   // Try initializing native extension immediately
@@ -856,7 +791,7 @@
     });
   }
 
-  setInterval(triggerLiveDecoration, 1000);
+  // No polling or direct .cm-line rewrites.
 
   // 7. Extract all CriticMarkup annotations to clipboard (⌘ + Shift + E)
   function extractAllAnnotations() {
@@ -943,16 +878,7 @@
         showToast(isFoldEnabled ? "👁️ 已开启便签折叠预览视图" : "📝 已切换至纯文本源码视图");
         const view = getEditorView();
         if (view && typeof view.dispatch === "function") {
-          view.dispatch({});
-        }
-        if (!isFoldEnabled) {
-          document.querySelectorAll(".cm-critic-highlight").forEach((el) => {
-            const parent = el.parentNode;
-            if (parent) {
-              const orig = el.textContent;
-              // let CM redraw
-            }
-          });
+          view.dispatch({ selection: view.state.selection });
         }
       }
     },
