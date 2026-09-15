@@ -28,7 +28,124 @@ var import_state = require("@codemirror/state");
 
 // CriticFlow/packages/obsidian/document-target.ts
 var import_obsidian = require("obsidian");
-var prose = (text) => text.replace(/\{>>[\s\S]*?<<\}/g, "").replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/<[^>]*>/g, "").replace(/[^\p{L}\p{N}]/gu, "");
+
+// CriticFlow/packages/obsidian/source-projection.ts
+function sourceProjection(source) {
+  var _a, _b, _c, _d;
+  const hidden = new Uint8Array(source.length);
+  const wrappers = [];
+  const hide = (from2, to2) => hidden.fill(1, from2, to2);
+  for (const re of [/\{>>[\s\S]*?<<\}/g, /<\/?[a-z][^>]*>/gi]) {
+    for (const m of source.matchAll(re)) hide(m.index, m.index + m[0].length);
+  }
+  for (const m of source.matchAll(/!?\[([^\]]*)\]\([^)]*\)/g)) {
+    const label = m.index + m[0].indexOf("[") + 1;
+    hide(m.index, label);
+    hide(label + m[1].length, m.index + m[0].length);
+    wrappers.push({ from: m.index, to: m.index + m[0].length, contentFrom: label, contentTo: label + m[1].length });
+  }
+  for (const m of source.matchAll(/\[\[([^|\]]+)(?:\|([^\]]+))?\]\]/g)) {
+    const label = m.index + (m[2] === void 0 ? 2 : m[0].indexOf("|") + 1), value = (_a = m[2]) != null ? _a : m[1];
+    hide(m.index, label);
+    hide(label + value.length, m.index + m[0].length);
+    wrappers.push({ from: m.index, to: m.index + m[0].length, contentFrom: label, contentTo: label + value.length });
+  }
+  const stack = [];
+  for (const m of source.matchAll(/\\[\s\S]|`+|\*+|_+|~{2}|={2}/g)) {
+    const run = m[0], at = m.index;
+    if (run[0] === "\\" || hidden[at]) continue;
+    const previous = source[at - 1] || " ", next = source[at + run.length] || " ";
+    if (run[0] === "_" && /[\p{L}\p{N}]/u.test(previous) && /[\p{L}\p{N}]/u.test(next)) continue;
+    const code = stack[stack.length - 1];
+    if ((code == null ? void 0 : code.token[0]) === "`" && run !== code.token) continue;
+    let used = 0;
+    while (used < run.length) {
+      const top = stack[stack.length - 1];
+      if (top && (run[0] === "`" || !/\s/.test(previous)) && run.slice(used).startsWith(top.token) && (run[0] !== "`" || top.token === run)) {
+        const end = at + used + top.token.length;
+        wrappers.push({ from: top.from, to: end, contentFrom: top.end, contentTo: at + used });
+        stack.pop();
+        used += top.token.length;
+      } else if (run[0] === "`" || !/\s/.test(next)) {
+        const size = run[0] === "`" ? run.length : Math.min(2, run.length - used);
+        const token = run.slice(used, used + size);
+        stack.push({ token, from: at + used, end: at + used + size });
+        used += size;
+      } else break;
+    }
+  }
+  const html = [];
+  for (const m of source.matchAll(/<(\/?)([a-z][\w:-]*)\b[^>]*>/gi)) {
+    const name = m[2].toLowerCase();
+    if (!["a", "strong", "b", "em", "i", "span", "mark", "s", "del", "u", "code"].includes(name)) continue;
+    if (!m[1]) html.push({ name, from: m.index, end: m.index + m[0].length });
+    else if (((_b = html[html.length - 1]) == null ? void 0 : _b.name) === name) {
+      const opening = html.pop();
+      wrappers.push({ from: opening.from, to: m.index + m[0].length, contentFrom: opening.end, contentTo: m.index });
+    }
+  }
+  const entities = /* @__PURE__ */ new Map();
+  for (const m of source.matchAll(/&(?:#x[0-9a-f]+|#\d+|[a-z][a-z0-9]+);/gi)) {
+    if (hidden[m.index]) continue;
+    const decoder = document.createElement("textarea");
+    decoder.innerHTML = m[0];
+    if (decoder.value !== m[0]) entities.set(m.index, { value: decoder.value, length: m[0].length });
+  }
+  const from = [], to = [];
+  let text = "";
+  for (let at = 0; at < source.length; ) {
+    const entity = entities.get(at), char = String.fromCodePoint(source.codePointAt(at));
+    const length = (_c = entity == null ? void 0 : entity.length) != null ? _c : char.length, value = (_d = entity == null ? void 0 : entity.value) != null ? _d : char;
+    if (!hidden[at]) for (const rendered of value) {
+      if (!/[\p{L}\p{N}]/u.test(rendered)) continue;
+      text += rendered;
+      for (let i = 0; i < rendered.length; i++) {
+        from.push(at);
+        to.push(at + length);
+      }
+    }
+    at += length;
+  }
+  function expand(start, end) {
+    let changed;
+    do {
+      changed = false;
+      for (const w of wrappers) {
+        if (end <= w.contentFrom || start >= w.contentTo) continue;
+        const coversContent = start <= w.contentFrom && end >= w.contentTo;
+        const crossesOpening = start < w.contentFrom && end > w.contentFrom;
+        const crossesClosing = start < w.contentTo && end > w.contentTo;
+        if (!(coversContent || crossesOpening || crossesClosing)) continue;
+        const nextStart = Math.min(start, w.from), nextEnd = Math.max(end, w.to);
+        if (nextStart !== start || nextEnd !== end) {
+          start = nextStart;
+          end = nextEnd;
+          changed = true;
+        }
+      }
+    } while (changed);
+    return { from: start, to: end };
+  }
+  return { text, from, to, expand };
+}
+
+// CriticFlow/packages/obsidian/document-target.ts
+var readingSections = /* @__PURE__ */ new WeakMap();
+function bindReadingSection(element, section) {
+  readingSections.set(element, section);
+}
+function sectionFor(node) {
+  for (let el = node.nodeType === 1 ? node : node.parentElement; el; el = el.parentElement) {
+    const section = readingSections.get(el);
+    if (section) return { element: el, section };
+  }
+}
+function offsets(text, needle) {
+  const result = [];
+  if (needle) for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) result.push(at);
+  return result;
+}
+var prose = (text) => text.replace(/\{>>[\s\S]*?<<\}/g, "").replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, "$2").replace(/<\/?[a-z][^>]*>/gi, "").replace(/[^\p{L}\p{N}]/gu, "");
 var markupPattern = () => /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g;
 var hasMarkers = (text) => /\{==|==\}|\{>>|<<\}/.test(text);
 function resolveActiveContext(app) {
@@ -44,6 +161,7 @@ function visibleText(range) {
   return prose(fragment.textContent || "");
 }
 function captureAddition(app) {
+  var _a, _b;
   const selection = window.getSelection();
   const range = selection && !selection.isCollapsed && selection.rangeCount ? selection.getRangeAt(0) : null;
   const view = range ? owningView(app, range.startContainer) : resolveActiveContext(app).view;
@@ -57,9 +175,12 @@ function captureAddition(app) {
   }
   if (!range) return null;
   const parent = range.startContainer.parentElement;
-  if (parent == null ? void 0 : parent.closest("pre, code, input, textarea, .cm-critic-badge, .criticflow-modal-overlay")) return null;
+  if (parent == null ? void 0 : parent.closest("pre, code, input, textarea, .cm-critic-badge, .criticflow-modal-overlay, .criticflow-reading-mark, .internal-embed, .markdown-embed, .inline-title, .metadata-container")) return null;
   const text = selection.toString().trim();
-  const root = (parent == null ? void 0 : parent.closest(".markdown-preview-view")) || view.contentEl;
+  const startSection = sectionFor(range.startContainer), endSection = sectionFor(range.endContainer);
+  if ([startSection, endSection].some((s) => s && s.section.path !== file.path)) return null;
+  const scoped = startSection && startSection.element.contains(range.endContainer) ? startSection : void 0;
+  const root = (scoped == null ? void 0 : scoped.element) || (parent == null ? void 0 : parent.closest(".markdown-preview-view")) || view.contentEl;
   if (!text || !root.contains(range.endContainer)) return null;
   const before = range.cloneRange();
   before.selectNodeContents(root);
@@ -67,13 +188,18 @@ function captureAddition(app) {
   const after = range.cloneRange();
   after.selectNodeContents(root);
   after.setStart(range.endContainer, range.endOffset);
+  const prefix = visibleText(before), suffix = visibleText(after), needle = prose(text);
+  const all = offsets(prefix + needle + suffix, needle), occurrence = all.indexOf(prefix.length);
   return { text, target: {
     file,
     path: file.path,
     view,
-    snapshot: app.vault.read(file).catch(() => null),
-    before: visibleText(before).slice(-96),
-    after: visibleText(after).slice(0, 96)
+    snapshot: (_a = scoped == null ? void 0 : scoped.section.snapshot) != null ? _a : app.vault.read(file).catch(() => null),
+    bounds: (_b = scoped == null ? void 0 : scoped.section.bounds) != null ? _b : void 0,
+    occurrence: scoped && occurrence >= 0 ? occurrence : void 0,
+    total: scoped ? all.length : void 0,
+    before: prefix.slice(-96),
+    after: suffix.slice(0, 96)
   } };
 }
 function targetForWidget(app, cm, badge) {
@@ -85,6 +211,7 @@ function targetForWidget(app, cm, badge) {
   return { file: view.file, path: view.file.path, view, cm, snapshot, from: match.index, to: match.index + match[0].length };
 }
 function locate(snapshot, expected, target) {
+  var _a, _b;
   if (target.from !== void 0 && target.to !== void 0) {
     if (snapshot.slice(target.from, target.to) !== expected) throw new Error("\u6279\u6CE8\u4F4D\u7F6E\u6216\u539F\u6587\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u6279\u6CE8");
     if (!hasMarkers(expected) && [...snapshot.matchAll(markupPattern())].some((m) => target.from < m.index + m[0].length && target.to > m.index))
@@ -92,29 +219,48 @@ function locate(snapshot, expected, target) {
     return { from: target.from, to: target.to };
   }
   const occupied = [...snapshot.matchAll(markupPattern())].map((m) => [m.index, m.index + m[0].length]);
-  const candidates = [];
-  for (let at = snapshot.indexOf(expected); at >= 0; at = snapshot.indexOf(expected, at + 1)) {
-    if (occupied.some(([from, to]) => at < to && at + expected.length > from)) continue;
+  const bounds = target.bounds || { from: 0, to: snapshot.length };
+  const valid = (c) => c.from >= bounds.from && c.to <= bounds.to && !occupied.some(([from, to]) => c.from < to && c.to > from) && !hasMarkers(snapshot.slice(c.from, c.to));
+  const choose = (candidates2) => {
+    if (candidates2.length === 1) return candidates2[0];
     const before = (target.before || "").slice(-48), after = (target.after || "").slice(0, 48);
-    if ((!before || prose(snapshot.slice(0, at)).endsWith(before)) && (!after || prose(snapshot.slice(at + expected.length)).startsWith(after))) candidates.push(at);
-  }
-  if (candidates.length !== 1) throw new Error("\u9009\u533A\u4E0E\u6E90\u6587\u4EF6\u65E0\u6CD5\u552F\u4E00\u5BF9\u5E94\uFF0C\u672A\u5199\u5165\uFF1B\u8BF7\u5728\u7F16\u8F91\u6A21\u5F0F\u6279\u6CE8");
-  return { from: candidates[0], to: candidates[0] + expected.length };
+    const anchored = candidates2.filter((c) => (!before || prose(snapshot.slice(bounds.from, c.from)).endsWith(before)) && (!after || prose(snapshot.slice(c.to, bounds.to)).startsWith(after)));
+    if (anchored.length === 1) return anchored[0];
+    if (target.bounds && target.total === candidates2.length && target.occurrence !== void 0)
+      return candidates2[target.occurrence];
+    return void 0;
+  };
+  const exact = offsets(snapshot.slice(bounds.from, bounds.to), expected).map((at) => ({ from: at + bounds.from, to: at + bounds.from + expected.length })).filter(valid);
+  const projection = sourceProjection(snapshot.slice(bounds.from, bounds.to)), needle = prose(expected);
+  const leading = ((_a = expected.match(/^[^\p{L}\p{N}]*/u)) == null ? void 0 : _a[0]) || "";
+  const trailing = ((_b = expected.match(/[^\p{L}\p{N}]*$/u)) == null ? void 0 : _b[0]) || "";
+  const projected = offsets(projection.text, needle).map((at) => {
+    let from = bounds.from + projection.from[at], to = bounds.from + projection.to[at + needle.length - 1];
+    if (leading && snapshot.slice(from - leading.length, from) === leading) from -= leading.length;
+    if (trailing && snapshot.slice(to, to + trailing.length) === trailing) to += trailing.length;
+    const expanded = projection.expand(from - bounds.from, to - bounds.from);
+    return { from: bounds.from + expanded.from, to: bounds.from + expanded.to };
+  }).filter(valid);
+  const candidates = projected.length ? projected.map((c) => exact.find((e) => e.from <= c.from && e.to >= c.to) || c) : exact;
+  const resolved = choose(candidates);
+  if (resolved) return resolved;
+  throw new Error("\u5F53\u524D\u6E32\u67D3\u9009\u533A\u65E0\u6CD5\u5BF9\u5E94\u539F\u6587\u4EF6\u4E2D\u7684\u552F\u4E00\u4F4D\u7F6E\uFF0C\u672A\u5199\u5165\uFF1B\u8BF7\u91CD\u65B0\u5212\u9009\u4EE5\u5237\u65B0\u4F4D\u7F6E");
 }
 async function replaceTarget(app, target, expected, replacement) {
   var _a;
   const snapshot = await target.snapshot;
   if (snapshot === null || target.file.path !== target.path) throw new Error("\u539F\u6587\u4EF6\u5DF2\u79FB\u52A8\u6216\u8BFB\u53D6\u5931\u8D25\uFF0C\u672A\u5199\u5165");
   const { from, to } = locate(snapshot, expected, target);
+  const inserted = typeof replacement === "function" ? replacement(snapshot.slice(from, to)) : replacement;
   if (target.cm || target.editor) {
     if (((_a = target.view) == null ? void 0 : _a.file) !== target.file || target.view.getMode() !== "source") throw new Error("\u539F\u7F16\u8F91\u5668\u5DF2\u5207\u6362\uFF0C\u672A\u5199\u5165");
     if (target.cm) {
       if (!target.cm.dom.isConnected || target.cm.state.doc.toString() !== snapshot) throw new Error("\u6587\u6863\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u6279\u6CE8");
-      target.cm.dispatch({ changes: { from, to, insert: replacement } });
+      target.cm.dispatch({ changes: { from, to, insert: inserted } });
     } else {
       const editor = target.editor;
       if (editor !== target.view.editor || editor.getValue() !== snapshot) throw new Error("\u6587\u6863\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u5212\u9009");
-      editor.replaceRange(replacement, editor.offsetToPos(from), editor.offsetToPos(to));
+      editor.replaceRange(inserted, editor.offsetToPos(from), editor.offsetToPos(to));
     }
     return "editor";
   }
@@ -125,7 +271,7 @@ async function replaceTarget(app, target, expected, replacement) {
   }
   await app.vault.process(target.file, (current) => {
     if (current !== snapshot) throw new Error("\u6587\u4EF6\u5DF2\u53D8\u5316\uFF0C\u672A\u8986\u76D6\uFF1B\u8BF7\u91CD\u65B0\u6253\u5F00\u6279\u6CE8");
-    return current.slice(0, from) + replacement + current.slice(to);
+    return current.slice(0, from) + inserted + current.slice(to);
   });
   return "file";
 }
@@ -348,7 +494,7 @@ function openAddAnnotationModal(app, selectedText, target) {
     saving = true;
     submitBtn.disabled = true;
     try {
-      const result = await replaceTarget(app, target, selectedText, `{==${selectedText}==}{>>${comment}<<}`);
+      const result = await replaceTarget(app, target, selectedText, (original) => `{==${original}==}{>>${comment}<<}`);
       new import_obsidian2.Notice(result === "file" ? "\u2705 \u5DF2\u4FDD\u5B58\u5230\u539F\u6587\u4EF6" : "\u2705 \u5DF2\u5199\u5165\u539F\u7F16\u8F91\u5668\uFF0C\u7531 Obsidian \u81EA\u52A8\u4FDD\u5B58");
       overlay.remove();
       activePluginInstance == null ? void 0 : activePluginInstance.resetSelectionState();
@@ -631,19 +777,20 @@ var CriticMarkupPlugin = class extends import_obsidian2.Plugin {
   }
   registerReadingViewProcessor() {
     this.registerMarkdownPostProcessor(async (element, context) => {
-      if (!this.settings.foldEnabled) return;
       const file = this.app.vault.getAbstractFileByPath(context.sourcePath);
       if (!(file instanceof import_obsidian2.TFile)) return;
       try {
         const section = context.getSectionInfo(element);
         const snapshot = await this.app.vault.read(file);
-        if (activePluginInstance !== this || !this.settings.foldEnabled) return;
+        if (activePluginInstance !== this) return;
         let bounds = null;
         if (section) {
           const lines = snapshot.split("\n");
           const offset = (line) => lines.slice(0, line).reduce((sum, s) => sum + s.length + 1, 0);
           bounds = { from: offset(section.lineStart), to: Math.min(snapshot.length, offset(section.lineEnd + 1)) };
         }
+        bindReadingSection(element, { path: file.path, snapshot, bounds });
+        if (!this.settings.foldEnabled) return;
         renderReadingAnnotations(
           element,
           { file, path: file.path, snapshot },

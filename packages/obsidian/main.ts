@@ -10,7 +10,7 @@ import {
   WidgetType,
 } from "@codemirror/view";
 import { Extension, StateField } from "@codemirror/state";
-import { captureAddition, hasMarkers, markupPattern, replaceTarget, resolveActiveContext, targetForWidget, type Target } from "./document-target";
+import { bindReadingSection, captureAddition, hasMarkers, markupPattern, replaceTarget, resolveActiveContext, targetForWidget, type Target } from "./document-target";
 import { renderReadingAnnotations } from "./reading-renderer";
 
 interface CriticMarkupSettings {
@@ -188,7 +188,7 @@ function openAddAnnotationModal(
     if (hasMarkers(selectedText + comment)) { new Notice("不支持嵌套批注或 CriticMarkup 分隔符"); return; }
     saving = true; submitBtn.disabled = true;
     try {
-      const result = await replaceTarget(app, target, selectedText, `{==${selectedText}==}{>>${comment}<<}`);
+      const result = await replaceTarget(app, target, selectedText, original => `{==${original}==}{>>${comment}<<}`);
       new Notice(result === "file" ? "✅ 已保存到原文件" : "✅ 已写入原编辑器，由 Obsidian 自动保存");
       overlay.remove();
       activePluginInstance?.resetSelectionState();
@@ -514,19 +514,20 @@ export default class CriticMarkupPlugin extends Plugin {
 
   private registerReadingViewProcessor() {
     this.registerMarkdownPostProcessor(async (element, context) => {
-      if (!this.settings.foldEnabled) return;
       const file = this.app.vault.getAbstractFileByPath(context.sourcePath);
       if (!(file instanceof TFile)) return;
       try {
         const section = context.getSectionInfo(element);
         const snapshot = await this.app.vault.read(file);
-        if (activePluginInstance !== this || !this.settings.foldEnabled) return;
+        if (activePluginInstance !== this) return;
         let bounds = null;
         if (section) {
           const lines = snapshot.split("\n");
           const offset = (line: number) => lines.slice(0, line).reduce((sum, s) => sum + s.length + 1, 0);
           bounds = { from: offset(section.lineStart), to: Math.min(snapshot.length, offset(section.lineEnd + 1)) };
         }
+        bindReadingSection(element, { path: file.path, snapshot, bounds });
+        if (!this.settings.foldEnabled) return;
         renderReadingAnnotations(element, { file, path: file.path, snapshot }, bounds,
           (original, comment, target) => openAnnotationManageModal(this.app, original, comment, target));
       } catch (err) { console.warn("CriticFlow reading renderer:", err); }

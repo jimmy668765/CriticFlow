@@ -1,6 +1,6 @@
 # MarkEdit CriticMarkup Annotation 扩展
 
-为 **MarkEdit（仅 macOS）** 提供就地批注与 Agent 审阅工作流。v1.2.0 为 GitHub prerelease；核心实现已完成，但尚未完成实机验收。
+为 **MarkEdit（仅 macOS）** 提供就地批注与 Agent 审阅工作流。v1.2.1 为 GitHub prerelease；本版本未运行测试，未完成 GUI 验收或实机验收。
 
 ## 核心能力
 
@@ -28,4 +28,4 @@ bash install.sh
 
 如果发现旧的 Scripts 文件，会先将其备份到 `~/.criticflow/backups/markedit/` 下的唯一时间目录；逐字节匹配的 `editor.js` 也会一并备份。仅当两者逐字节相同时，才会同步替换 `editor.js`；不一致时会保留用户的 `editor.js` 不动。
 
-完成后重启 MarkEdit 使脚本生效。
+安装后需重启 MarkEdit；本版本不声称脚本已在界面加载。

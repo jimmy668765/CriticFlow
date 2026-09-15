@@ -1,6 +1,6 @@
 # CriticFlow Paseo 插件
 
-Paseo 网页端划词引用与 CriticMarkup 批注插件。v1.2.0 为 GitHub prerelease，依赖网页 DOM 与 Paseo Plugin RPC；**Paseo 原生手机端不支持**。
+Paseo 网页端划词引用与 CriticMarkup 批注插件。v1.2.1 为 GitHub prerelease；本版本未运行测试，未完成 GUI 验收。依赖网页 DOM 与 Paseo Plugin RPC；**Paseo 原生手机端不支持**。
 
 不需要 bridge，也不需要手动启动本地 server。
 

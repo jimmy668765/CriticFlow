@@ -1,8 +1,8 @@
 # CriticFlow ⚡️
 
-> **Markdown 批注与 Agent 审阅工具集（v1.2.0）**
+> **Markdown 批注与 Agent 审阅工具集（v1.2.1）**
 >
-> *面向 Paseo、Obsidian 与 MarkEdit 的 CriticMarkup 批注工作流。GitHub v1.2.0 为 prerelease；核心实现已完成，尚未完成全端实机验收。*
+> *面向 Paseo、Obsidian 与 MarkEdit 的 CriticMarkup 批注工作流。GitHub v1.2.1 为 prerelease；本版本未运行测试，未完成 GUI 验收或全端实机验收。*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Format: CriticMarkup](https://img.shields.io/badge/Syntax-CriticMarkup-blue.svg)](https://criticmarkup.com/)
@@ -33,10 +33,10 @@
 
 ---
 
-## ⚠️ v1.2.0 发布边界
+## ⚠️ v1.2.1 发布边界
 
-- GitHub v1.2.0 为 **prerelease**；核心实现已完成，但尚未完成全端实机验收。
-- **Obsidian**：目标覆盖 desktop/mobile。Reading View 的跨 section / 跨块长备注保留源码，建议编辑模式处理。
+- GitHub v1.2.1 为 **prerelease**；本版本未运行测试，未完成 GUI 验收或全端实机验收。
+- **Obsidian**：Reading View 按源 section 范围与快照绑定定位，重复出现次数按位置区分；跨 section / 跨块长备注仍保留源码。
 - **MarkEdit**：仅支持 macOS。已核对 `saveDocument(): Promise<boolean>` 自动保存 API；API 缺失或失败时明确提示 `Cmd+S`。
 - **Paseo**：依赖网页 DOM 与 Paseo Plugin RPC，原生手机端不支持。保存是备份、最后检查与原子 rename，不是跨进程原子 CAS；请避免多个编辑器并写。
 - Paseo 跨段落或列表项等块级边界的批注暂时保留源码，高亮/气泡的这部分支持仍未完成，避免破坏渲染结构。
@@ -57,10 +57,10 @@
 
 #### 方式 B：通过 BRAT 插件一键测试
 1. 在 Obsidian 安装社区热门测试工具 **BRAT**；
-2. 在 BRAT 中添加 GitHub 仓库地址，并选择候选版本 `1.2.0`（默认最新稳定版可能仍为 `1.1.2`）。
+2. 在 BRAT 中添加 GitHub 仓库地址，并选择候选版本 `1.2.1`（默认最新稳定版可能仍为 `1.1.2`）。
 
 #### 方式 C：官方 Community Plugins 市场
-本项目按官方格式准备；当前 v1.2.0 为 prerelease，尚未作为稳定版本提交官方市场。
+本项目按官方格式准备；当前 v1.2.1 为 prerelease，尚未作为稳定版本提交官方市场。
 
 ---
 
