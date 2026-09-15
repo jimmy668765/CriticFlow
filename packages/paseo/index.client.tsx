@@ -71,7 +71,7 @@ function isInsideInputElement(node: Node | null): boolean {
   const el = node instanceof HTMLElement ? node : node.parentElement;
   if (!el) return false;
   return !!el.closest(
-    'input, textarea, [data-testid="message-input-root"], [contenteditable="true"], #paseo-quote-selection-toolbar, #paseo-quote-annotation-popover'
+    'input, textarea, [data-testid="message-input-root"], [data-testid*="message-input"], [data-composer-input], #paseo-quote-selection-toolbar, #paseo-quote-annotation-popover'
   );
 }
 
