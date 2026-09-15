@@ -11,56 +11,113 @@ const WORKSPACE_ROOT =
 const ANNOTATE_HTTP_PORT = 29789;
 
 /**
- * Locate target Markdown file containing the original text in the workspace.
+ * Collect all registered project roots and workspaces dynamically from ~/.paseo
  */
-function findMarkdownFileWithText(baseDir: string, textToFind: string): string | null {
+function getAllWorkspaceRoots(): string[] {
+  const roots = new Set<string>();
+  
+  if (process.env.PASEO_WORKSPACE) {
+    roots.add(process.env.PASEO_WORKSPACE);
+  }
+  
+  const homeDir = process.env.HOME || "/Users/jermy";
+  const paseoDir = path.join(homeDir, ".paseo");
+
+  // Read all projects
+  const projectsJson = path.join(paseoDir, "projects", "projects.json");
+  if (fs.existsSync(projectsJson)) {
+    try {
+      const projects = JSON.parse(fs.readFileSync(projectsJson, "utf-8"));
+      if (Array.isArray(projects)) {
+        for (const p of projects) {
+          if (p.rootPath && fs.existsSync(p.rootPath)) {
+            roots.add(p.rootPath);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // Read all workspaces
+  const workspacesJson = path.join(paseoDir, "projects", "workspaces.json");
+  if (fs.existsSync(workspacesJson)) {
+    try {
+      const workspaces = JSON.parse(fs.readFileSync(workspacesJson, "utf-8"));
+      if (Array.isArray(workspaces)) {
+        for (const w of workspaces) {
+          if (w.cwd && fs.existsSync(w.cwd)) {
+            roots.add(w.cwd);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  roots.add(path.join(homeDir, "Desktop"));
+  roots.add(path.join(homeDir, "Desktop", "shuijing"));
+  return Array.from(roots);
+}
+
+/**
+ * Locate target Markdown file containing the original text across all workspaces.
+ */
+function findMarkdownFileWithText(textToFind: string, fileHint?: string): string | null {
   const cleanText = textToFind.trim();
   if (!cleanText) return null;
 
-  try {
-    const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+  const roots = getAllWorkspaceRoots();
+  const visitedDirs = new Set<string>();
 
-    // Priority 1: Check demo-review.md first
-    const demoPath = path.join(baseDir, "demo-review.md");
-    if (fs.existsSync(demoPath)) {
-      try {
-        if (fs.readFileSync(demoPath, "utf-8").includes(cleanText)) {
-          return demoPath;
+  function collectMdFiles(dir: string, depth = 0, maxDepth = 4): string[] {
+    if (depth > maxDepth || visitedDirs.has(dir)) return [];
+    visitedDirs.add(dir);
+
+    const files: string[] = [];
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name === "dist") {
+          continue;
         }
-      } catch {}
-    }
+        const full = path.join(dir, entry.name);
+        if (entry.isFile() && (entry.name.endsWith(".md") || entry.name.endsWith(".markdown"))) {
+          files.push(full);
+        } else if (entry.isDirectory()) {
+          files.push(...collectMdFiles(full, depth + 1, maxDepth));
+        }
+      }
+    } catch {}
+    return files;
+  }
 
-    // Priority 2: Check other .md files in workspace root
-    for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith(".md") && entry.name !== "demo-review.md") {
-        const fullPath = path.join(baseDir, entry.name);
+  const allFiles: string[] = [];
+  for (const root of roots) {
+    allFiles.push(...collectMdFiles(root));
+  }
+
+  // 1. If fileHint provided, prioritize matching files
+  const hint = fileHint ? path.basename(fileHint).replace(/\.\.\.$/, "").trim() : "";
+  if (hint) {
+    for (const file of allFiles) {
+      if (path.basename(file) === "demo-review.md") continue;
+      if (path.basename(file).includes(hint) || hint.includes(path.basename(file).replace(/\.md$/, ""))) {
         try {
-          if (fs.readFileSync(fullPath, "utf-8").includes(cleanText)) {
-            return fullPath;
+          if (fs.readFileSync(file, "utf-8").includes(cleanText)) {
+            return file;
           }
         } catch {}
       }
     }
+  }
 
-    // Priority 3: Check immediate subdirectories (excluding node_modules / .git)
-    for (const entry of entries) {
-      if (entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules") {
-        const subDir = path.join(baseDir, entry.name);
-        try {
-          const subEntries = fs.readdirSync(subDir, { withFileTypes: true });
-          for (const sub of subEntries) {
-            if (sub.isFile() && sub.name.endsWith(".md")) {
-              const subPath = path.join(subDir, sub.name);
-              if (fs.readFileSync(subPath, "utf-8").includes(cleanText)) {
-                return subPath;
-              }
-            }
-          }
-        } catch {}
+  // 2. Scan all markdown files for text match
+  for (const file of allFiles) {
+    if (path.basename(file) === "demo-review.md") continue;
+    try {
+      if (fs.readFileSync(file, "utf-8").includes(cleanText)) {
+        return file;
       }
-    }
-  } catch (err) {
-    console.error("[quote-selection server] readdir error:", err);
+    } catch {}
   }
 
   return null;
@@ -68,6 +125,7 @@ function findMarkdownFileWithText(baseDir: string, textToFind: string): string |
 
 function processAnnotation(input: {
   filePath?: string;
+  fileHint?: string;
   originalText: string;
   comment: string;
   action?: "annotate" | "delete" | "edit";
@@ -81,25 +139,17 @@ function processAnnotation(input: {
     return { success: false, savedPath: null, error: "缺少原文内容" };
   }
 
-  const workspaceDir = WORKSPACE_ROOT;
   let targetFile = input.filePath;
 
   if (!targetFile || !fs.existsSync(targetFile)) {
-    targetFile = findMarkdownFileWithText(workspaceDir, textToAnnotate) || undefined;
-  }
-
-  if (!targetFile) {
-    const demoPath = path.join(workspaceDir, "demo-review.md");
-    if (fs.existsSync(demoPath)) {
-      targetFile = demoPath;
-    }
+    targetFile = findMarkdownFileWithText(textToAnnotate, input.fileHint) || undefined;
   }
 
   if (!targetFile || !fs.existsSync(targetFile)) {
     return {
       success: false,
       savedPath: null,
-      error: "未在工作区找到对应的 Markdown 文件",
+      error: "未在任何已注册的工作区中找到包含该选区文本的 Markdown 文件",
     };
   }
 
@@ -108,12 +158,10 @@ function processAnnotation(input: {
     let updatedContent = fileContent;
 
     if (action === "delete") {
-      // Revert {==text==}{>>comment<<} back to text
       const criticTarget = `{==${textToAnnotate}==}{>>${cleanComment}<<}`;
       if (fileContent.includes(criticTarget)) {
         updatedContent = fileContent.replace(criticTarget, textToAnnotate);
       } else {
-        // Loose regex match if whitespace varied
         const looseRegex = new RegExp(`\\{==\\s*${escapeRegExp(textToAnnotate)}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`, "g");
         updatedContent = fileContent.replace(looseRegex, textToAnnotate);
       }

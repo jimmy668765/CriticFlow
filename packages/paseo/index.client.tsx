@@ -422,7 +422,20 @@ export default function contribute(client: PluginClientContext) {
         win!.navigator.clipboard.writeText(criticText);
       }
 
-      // 4. Call server backend to persist annotation directly into the local Markdown file!
+      // 4. Detect active tab/document title hint from DOM
+      let fileHint: string | undefined;
+      try {
+        const tabEls = Array.from(doc!.querySelectorAll<HTMLElement>('[role="tab"], [data-testid*="tab"], [data-testid*="header"], header, nav, div, span'));
+        for (const el of tabEls) {
+          const txt = (el.innerText || el.textContent || "").trim();
+          if (txt.includes(".md") || txt.includes(".markdown") || txt.includes("PPT") || txt.includes("企业介绍")) {
+            fileHint = txt;
+            break;
+          }
+        }
+      } catch {}
+
+      // 5. Call server backend to persist annotation directly into the local Markdown file!
       try {
         fetch("http://127.0.0.1:29789/annotate", {
           method: "POST",
@@ -430,6 +443,7 @@ export default function contribute(client: PluginClientContext) {
           body: JSON.stringify({
             originalText: textToAnnotate,
             comment: comment,
+            fileHint: fileHint,
           }),
         })
           .then((res) => res.json())
