@@ -23,7 +23,7 @@ function escapeRegExp(str) {
 let activePluginInstance = null;
 
 // ==========================================
-// 1. CodeMirror 6 Visual Widget (编辑视图)
+// 1. CodeMirror 6 Visual Widget (Live Preview)
 // ==========================================
 class CriticBadgeWidget extends view_1.WidgetType {
     constructor(original, comment) {
@@ -73,7 +73,7 @@ class CriticBadgeWidget extends view_1.WidgetType {
 }
 
 // ==========================================
-// 2. Add Annotation Modal (添加批注弹窗)
+// 2. Add Annotation Modal
 // ==========================================
 class AddAnnotationModal extends obsidian_1.Modal {
     constructor(app, target, selectedText) {
@@ -140,10 +140,28 @@ class AddAnnotationModal extends obsidian_1.Modal {
         const critic = `{==${cleanOrig}==}{>>${text}<<}`;
 
         if (this.target.type === "editor") {
-            this.target.editor.replaceSelection(critic);
+            const editor = this.target.editor;
+            if (this.target.range) {
+                // Use exact saved range to prevent loss of focus on mobile
+                editor.replaceRange(critic, this.target.range.from, this.target.range.to);
+            } else {
+                const currentSel = editor.getSelection().trim();
+                if (currentSel === cleanOrig) {
+                    editor.replaceSelection(critic);
+                } else {
+                    const fullDoc = editor.getValue();
+                    const idx = fullDoc.indexOf(cleanOrig);
+                    if (idx !== -1) {
+                        const fromPos = editor.offsetToPos(idx);
+                        const toPos = editor.offsetToPos(idx + cleanOrig.length);
+                        editor.replaceRange(critic, fromPos, toPos);
+                    } else {
+                        editor.replaceSelection(critic);
+                    }
+                }
+            }
             new obsidian_1.Notice("✅ 已在文档中插入批注！");
         } else if (this.target.type === "file") {
-            // Direct Vault file modification for Reading View
             try {
                 const file = this.target.file;
                 const oldContent = await this.app.vault.read(file);
@@ -151,7 +169,6 @@ class AddAnnotationModal extends obsidian_1.Modal {
                 let pattern = new RegExp(safeOrig);
 
                 if (!pattern.test(oldContent)) {
-                    // Fallback with whitespace flex
                     const words = cleanOrig.split(/\s+/).map(escapeRegExp).join("\\s+");
                     pattern = new RegExp(words);
                 }
@@ -160,8 +177,13 @@ class AddAnnotationModal extends obsidian_1.Modal {
                     const newContent = oldContent.replace(pattern, critic);
                     await this.app.vault.modify(file, newContent);
                     new obsidian_1.Notice("✅ 已在文件中插入批注并落盘！");
+
+                    const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
+                    if (activeView && activeView.previewMode) {
+                        activeView.previewMode.rerender(true);
+                    }
                 } else {
-                    new obsidian_1.Notice("⚠️ 未能在原文中定位选区，请尝试在编辑模式下添加");
+                    new obsidian_1.Notice("⚠️ 未能在原文中定位选区");
                 }
             } catch (err) {
                 console.error("CriticFlow file modification failed:", err);
@@ -177,7 +199,7 @@ class AddAnnotationModal extends obsidian_1.Modal {
 }
 
 // ==========================================
-// 3. Annotation Manage Modal (查看/编辑/删除)
+// 3. Annotation Manage Modal
 // ==========================================
 class AnnotationManageModal extends obsidian_1.Modal {
     constructor(app, target, originalText, comment) {
@@ -189,7 +211,6 @@ class AnnotationManageModal extends obsidian_1.Modal {
     onOpen() {
         const { contentEl } = this;
         contentEl.empty();
-
         contentEl.createEl("h3", { text: "💬 批注详情" });
 
         // Quote preview
@@ -319,6 +340,11 @@ class AnnotationManageModal extends obsidian_1.Modal {
                             : `{==${cleanOrig}==}{>>${newCommentOrNull.trim()}<<}`;
                     const newDoc = fullDoc.replace(pattern, replacement);
                     await this.app.vault.modify(file, newDoc);
+
+                    const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
+                    if (activeView && activeView.previewMode) {
+                        activeView.previewMode.rerender(true);
+                    }
                 } else {
                     new obsidian_1.Notice("⚠️ 未能在文档中定位该批注位置");
                 }
@@ -333,7 +359,7 @@ class AnnotationManageModal extends obsidian_1.Modal {
 }
 
 // ==========================================
-// 4. Main Plugin
+// 4. Main Plugin Class
 // ==========================================
 class CriticMarkupPlugin extends obsidian_1.Plugin {
     constructor() {
@@ -341,29 +367,30 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
         this.settings = DEFAULT_SETTINGS;
         this.floatingBtn = null;
         this.activeSelectedText = "";
+        this.savedEditorRange = null;
     }
     async onload() {
         activePluginInstance = this;
         await this.loadSettings();
 
-        // 1. CodeMirror 6 Visual Decorator for Editing View (Live Preview)
+        // 1. Live Preview CM6 ViewPlugin
         this.registerEditorExtension(this.buildEditorExtension());
 
-        // 2. Markdown Post Processor for Reading View (阅读视图)
+        // 2. Reading View PostProcessor (Universal)
         this.registerReadingViewProcessor();
 
-        // 3. Setup Floating Toolbar (Desktop & Mobile Support)
+        // 3. Floating Toolbar (Desktop Mouse + Mobile Touch)
         this.setupFloatingToolbar();
 
-        // 4. Register Context Menu on Selection (Right Click / Mobile Selection Menu)
+        // 4. Mobile / Desktop Context Menu
         this.registerContextMenu();
 
-        // 5. Register Commands
+        // 5. Commands
         this.registerPluginCommands();
     }
 
     // --------------------------------------------------
-    // A. Editing View (Live Preview) CodeMirror Decorator
+    // A. Editing View CodeMirror Decorator
     // --------------------------------------------------
     buildEditorExtension() {
         const criticMatcher = new view_1.MatchDecorator({
@@ -406,88 +433,75 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
     }
 
     // --------------------------------------------------
-    // B. Reading View Markdown Post Processor (阅读视图渲染)
+    // B. Reading View Markdown Post Processor (Universal)
     // --------------------------------------------------
     registerReadingViewProcessor() {
         this.registerMarkdownPostProcessor((element, context) => {
             if (!this.settings.foldEnabled) return;
 
-            const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
-            const textNodes = [];
-            let node;
-            while ((node = walker.nextNode())) {
-                textNodes.push(node);
-            }
+            const blocks = element.querySelectorAll("p, li, h1, h2, h3, h4, h5, h6, blockquote");
+            const targets = blocks.length > 0 ? Array.from(blocks) : [element];
 
-            const regex = /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g;
-
-            for (const textNode of textNodes) {
-                const val = textNode.nodeValue;
-                if (!val || !val.includes("{==")) continue;
-
-                regex.lastIndex = 0;
-                if (!regex.test(val)) continue;
-                regex.lastIndex = 0;
-
-                const frag = document.createDocumentFragment();
-                let lastIndex = 0;
-                let match;
-
-                while ((match = regex.exec(val)) !== null) {
-                    const matchStart = match.index;
-                    const matchEnd = match.index + match[0].length;
-                    const origText = match[1];
-                    const commentText = match[2];
-
-                    if (matchStart > lastIndex) {
-                        frag.appendChild(document.createTextNode(val.slice(lastIndex, matchStart)));
-                    }
-
-                    // Highlight text span
-                    const hlSpan = document.createElement("span");
-                    hlSpan.className = "cm-critic-highlight";
-                    hlSpan.textContent = origText;
-                    frag.appendChild(hlSpan);
-
-                    // Golden capsule badge span
-                    const badgeSpan = document.createElement("span");
-                    badgeSpan.className = "cm-critic-badge";
-                    badgeSpan.innerHTML = `💬 <span>${escapeHtml(commentText)}</span>`;
-                    badgeSpan.title = `批注：${commentText} (点击查看或删除)`;
-
-                    const handleBadgeClick = (e) => {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
-                        const targetFile = activeView?.file;
-                        if (targetFile) {
-                            new AnnotationManageModal(
-                                this.app,
-                                { type: "file", file: targetFile },
-                                origText,
-                                commentText
-                            ).open();
-                        }
-                    };
-
-                    badgeSpan.addEventListener("click", handleBadgeClick);
-                    badgeSpan.addEventListener("touchend", handleBadgeClick);
-                    frag.appendChild(badgeSpan);
-
-                    lastIndex = matchEnd;
+            for (const block of targets) {
+                let html = block.innerHTML;
+                if (!html.includes("{") || (!html.includes(">>") && !html.includes("&gt;&gt;"))) {
+                    continue;
                 }
 
-                if (lastIndex < val.length) {
-                    frag.appendChild(document.createTextNode(val.slice(lastIndex)));
-                }
+                const criticRegex =
+                    /\{(?:==|<mark>)([\s\S]*?)(?:==|<\/mark>)\}\{(?:>>|&gt;&gt;)([\s\S]*?)(?:<<|&lt;&lt;)\}/g;
 
-                textNode.replaceWith(frag);
+                if (criticRegex.test(html)) {
+                    criticRegex.lastIndex = 0;
+                    const newHtml = html.replace(criticRegex, (m, orig, comm) => {
+                        const cleanOrig = orig.replace(/<[^>]+>/g, "").trim();
+                        const cleanComm = comm.replace(/<[^>]+>/g, "").trim();
+                        return `<span class="cm-critic-highlight">${escapeHtml(
+                            cleanOrig
+                        )}</span><span class="cm-critic-badge" data-orig="${encodeURIComponent(
+                            cleanOrig
+                        )}" data-comm="${encodeURIComponent(
+                            cleanComm
+                        )}">💬 <span>${escapeHtml(cleanComm)}</span></span>`;
+                    });
+
+                    block.innerHTML = newHtml;
+
+                    const badges = block.querySelectorAll(".cm-critic-badge");
+                    badges.forEach((badge) => {
+                        const origText = decodeURIComponent(
+                            badge.getAttribute("data-orig") || ""
+                        );
+                        const commText = decodeURIComponent(
+                            badge.getAttribute("data-comm") || ""
+                        );
+
+                        const handleBadgeAction = (e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            const activeView =
+                                this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
+                            const targetFile = activeView?.file;
+                            if (targetFile) {
+                                new AnnotationManageModal(
+                                    this.app,
+                                    { type: "file", file: targetFile },
+                                    origText,
+                                    commText
+                                ).open();
+                            }
+                        };
+
+                        badge.addEventListener("click", handleBadgeAction);
+                        badge.addEventListener("touchend", handleBadgeAction);
+                    });
+                }
             }
         });
     }
 
     // --------------------------------------------------
-    // C. Floating Toolbar (Desktop Mouse & Mobile Touch)
+    // C. Floating Toolbar (Desktop Mouse + Mobile Touch)
     // --------------------------------------------------
     setupFloatingToolbar() {
         this.floatingBtn = document.createElement("div");
@@ -502,10 +516,18 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 return;
             }
 
-            // Check both editor selection and DOM selection
             let sel = "";
+            this.savedEditorRange = null;
+
             if (activeView.getMode() === "source" && activeView.editor) {
-                sel = activeView.editor.getSelection().trim();
+                const editor = activeView.editor;
+                sel = editor.getSelection().trim();
+                if (sel) {
+                    this.savedEditorRange = {
+                        from: editor.getCursor("from"),
+                        to: editor.getCursor("to"),
+                    };
+                }
             }
 
             const domSel = window.getSelection();
@@ -524,9 +546,8 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 const range = domSel.getRangeAt(0);
                 const rect = range.getBoundingClientRect();
                 if (rect && rect.width > 0) {
-                    // Position above selection or adjust for viewport bounds
                     let top = rect.top - 42;
-                    if (top < 12) top = rect.bottom + 10; // place below if clipped at top
+                    if (top < 12) top = rect.bottom + 10;
                     let left = rect.left + rect.width / 2 - 40;
                     left = Math.max(12, Math.min(window.innerWidth - 95, left));
 
@@ -542,12 +563,9 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
             this.hideFloatingBtn();
         };
 
-        // Desktop events
         this.registerDomEvent(document, "mouseup", () => setTimeout(updateBtn, 80));
-        this.registerDomEvent(document, "selectionchange", () => setTimeout(updateBtn, 100));
-
-        // Mobile touch events
         this.registerDomEvent(document, "touchend", () => setTimeout(updateBtn, 120));
+        this.registerDomEvent(document, "selectionchange", () => setTimeout(updateBtn, 100));
 
         const triggerAnnotation = (e) => {
             e.preventDefault();
@@ -560,13 +578,25 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
             }
 
             const txt = this.activeSelectedText;
+            const savedRange = this.savedEditorRange;
             this.hideFloatingBtn();
 
             if (activeView.getMode() === "source" && activeView.editor) {
-                new AddAnnotationModal(this.app, { type: "editor", editor: activeView.editor }, txt).open();
+                new AddAnnotationModal(
+                    this.app,
+                    {
+                        type: "editor",
+                        editor: activeView.editor,
+                        range: savedRange || undefined,
+                    },
+                    txt
+                ).open();
             } else if (activeView.file) {
-                // Reading View
-                new AddAnnotationModal(this.app, { type: "file", file: activeView.file }, txt).open();
+                new AddAnnotationModal(
+                    this.app,
+                    { type: "file", file: activeView.file },
+                    txt
+                ).open();
             }
         };
 
@@ -579,6 +609,7 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
             this.floatingBtn.style.display = "none";
         }
         this.activeSelectedText = "";
+        this.savedEditorRange = null;
     }
 
     // --------------------------------------------------
@@ -589,12 +620,18 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
             this.app.workspace.on("editor-menu", (menu, editor, view) => {
                 const sel = editor.getSelection().trim();
                 if (sel) {
+                    const from = editor.getCursor("from");
+                    const to = editor.getCursor("to");
                     menu.addItem((item) => {
                         item
                             .setTitle("📝 添加划词批注 (CriticFlow)")
                             .setIcon("highlighter")
                             .onClick(() => {
-                                new AddAnnotationModal(this.app, { type: "editor", editor }, sel).open();
+                                new AddAnnotationModal(
+                                    this.app,
+                                    { type: "editor", editor, range: { from, to } },
+                                    sel
+                                ).open();
                             });
                     });
                 }
@@ -606,7 +643,7 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
     // E. Commands
     // --------------------------------------------------
     registerPluginCommands() {
-        // 1. Add Annotation
+        // 1. Add Annotation Command
         this.addCommand({
             id: "criticmarkup-add-annotation",
             name: "添加划词批注 (Add Annotation)",
@@ -618,8 +655,16 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 }
 
                 let selection = "";
+                let savedRange = undefined;
+
                 if (activeView.getMode() === "source" && activeView.editor) {
                     selection = activeView.editor.getSelection().trim();
+                    if (selection) {
+                        savedRange = {
+                            from: activeView.editor.getCursor("from"),
+                            to: activeView.editor.getCursor("to"),
+                        };
+                    }
                 }
                 if (!selection) {
                     const domSel = window.getSelection();
@@ -634,9 +679,17 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 }
 
                 if (activeView.getMode() === "source" && activeView.editor) {
-                    new AddAnnotationModal(this.app, { type: "editor", editor: activeView.editor }, selection).open();
+                    new AddAnnotationModal(
+                        this.app,
+                        { type: "editor", editor: activeView.editor, range: savedRange },
+                        selection
+                    ).open();
                 } else if (activeView.file) {
-                    new AddAnnotationModal(this.app, { type: "file", file: activeView.file }, selection).open();
+                    new AddAnnotationModal(
+                        this.app,
+                        { type: "file", file: activeView.file },
+                        selection
+                    ).open();
                 }
             },
             hotkeys: [
@@ -647,7 +700,7 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
             ],
         });
 
-        // 2. Extract All Annotations for AI Agent (Dual Mode)
+        // 2. Extract All Annotations for AI Agent
         this.addCommand({
             id: "criticmarkup-extract-annotations",
             name: "一键提取全文档批注为 Agent 指令 (Extract for Agent)",
@@ -697,7 +750,9 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 report += `请严格根据上述批注修改对应文件并保存，保持其他无关内容不变。\n`;
 
                 await navigator.clipboard.writeText(report);
-                new obsidian_1.Notice(`✅ 已将全部 ${matches.length} 条批注复制到剪贴板！可以直接发给 AI Agent。`);
+                new obsidian_1.Notice(
+                    `✅ 已将全部 ${matches.length} 条批注复制到剪贴板！可以直接发给 AI Agent。`
+                );
             },
             hotkeys: [
                 {

@@ -3,9 +3,9 @@ import {
   Modal,
   Notice,
   Plugin,
-  PluginSettingTab,
   Setting,
   Editor,
+  EditorPosition,
   MarkdownView,
   MarkdownPostProcessorContext,
   TFile,
@@ -16,7 +16,6 @@ import {
   EditorView,
   MatchDecorator,
   Decoration,
-  DecorationSet,
   WidgetType,
 } from "@codemirror/view";
 import { Extension } from "@codemirror/state";
@@ -42,17 +41,19 @@ function escapeRegExp(str: string): string {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Target definition for applying annotation changes
 export type AnnotationTarget =
-  | { type: "editor"; editor: Editor }
+  | {
+      type: "editor";
+      editor: Editor;
+      range?: { from: EditorPosition; to: EditorPosition };
+    }
   | { type: "cm-view"; view: EditorView }
   | { type: "file"; file: TFile };
 
-// Global reference to active plugin instance
 let activePluginInstance: CriticMarkupPlugin | null = null;
 
 // ==========================================
-// 1. CodeMirror 6 Visual Widget (编辑视图)
+// 1. CodeMirror 6 Visual Widget (Live Preview)
 // ==========================================
 class CriticBadgeWidget extends WidgetType {
   constructor(public original: string, public comment: string) {
@@ -84,17 +85,26 @@ class CriticBadgeWidget extends WidgetType {
 
     badge.addEventListener("click", handleOpen);
     badge.addEventListener("touchend", handleOpen);
+    badge.addEventListener("pointerup", handleOpen);
 
     return badge;
   }
 
   ignoreEvent(e: Event): boolean {
-    return e.type === "click" || e.type === "mousedown" || e.type === "touchend";
+    return (
+      e.type === "click" ||
+      e.type === "mousedown" ||
+      e.type === "mouseup" ||
+      e.type === "touchstart" ||
+      e.type === "touchend" ||
+      e.type === "pointerdown" ||
+      e.type === "pointerup"
+    );
   }
 }
 
 // ==========================================
-// 2. Add Annotation Modal (添加批注弹窗)
+// 2. Add Annotation Modal
 // ==========================================
 class AddAnnotationModal extends Modal {
   private comment = "";
@@ -166,10 +176,31 @@ class AddAnnotationModal extends Modal {
     const critic = `{==${cleanOrig}==}{>>${text}<<}`;
 
     if (this.target.type === "editor") {
-      this.target.editor.replaceSelection(critic);
+      const editor = this.target.editor;
+      if (this.target.range) {
+        // Use exact saved range to prevent loss of focus on mobile
+        editor.replaceRange(critic, this.target.range.from, this.target.range.to);
+      } else {
+        // Fallback: if selection exists use it, otherwise find in doc
+        const currentSel = editor.getSelection().trim();
+        if (currentSel === cleanOrig) {
+          editor.replaceSelection(critic);
+        } else {
+          // Robust locate in active document
+          const fullDoc = editor.getValue();
+          const idx = fullDoc.indexOf(cleanOrig);
+          if (idx !== -1) {
+            const fromPos = editor.offsetToPos(idx);
+            const toPos = editor.offsetToPos(idx + cleanOrig.length);
+            editor.replaceRange(critic, fromPos, toPos);
+          } else {
+            editor.replaceSelection(critic);
+          }
+        }
+      }
       new Notice("✅ 已在文档中插入批注！");
     } else if (this.target.type === "file") {
-      // Direct Vault file modification for Reading View
+      // Reading View direct vault write
       try {
         const file = this.target.file;
         const oldContent = await this.app.vault.read(file);
@@ -177,7 +208,6 @@ class AddAnnotationModal extends Modal {
         let pattern = new RegExp(safeOrig);
 
         if (!pattern.test(oldContent)) {
-          // Fallback with whitespace flex
           const words = cleanOrig.split(/\s+/).map(escapeRegExp).join("\\s+");
           pattern = new RegExp(words);
         }
@@ -186,8 +216,14 @@ class AddAnnotationModal extends Modal {
           const newContent = oldContent.replace(pattern, critic);
           await this.app.vault.modify(file, newContent);
           new Notice("✅ 已在文件中插入批注并落盘！");
+
+          // Force reading view rerender if available
+          const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+          if (activeView && (activeView as any).previewMode) {
+            (activeView as any).previewMode.rerender(true);
+          }
         } else {
-          new Notice("⚠️ 未能在原文中定位选区，请尝试在编辑模式下添加");
+          new Notice("⚠️ 未能在原文中定位选区");
         }
       } catch (err) {
         console.error("CriticFlow file modification failed:", err);
@@ -204,7 +240,7 @@ class AddAnnotationModal extends Modal {
 }
 
 // ==========================================
-// 3. Annotation Manage Modal (查看/编辑/删除)
+// 3. Annotation Manage Modal
 // ==========================================
 class AnnotationManageModal extends Modal {
   constructor(
@@ -219,7 +255,6 @@ class AnnotationManageModal extends Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-
     contentEl.createEl("h3", { text: "💬 批注详情" });
 
     // Quote preview
@@ -350,6 +385,11 @@ class AnnotationManageModal extends Modal {
               : `{==${cleanOrig}==}{>>${newCommentOrNull.trim()}<<}`;
           const newDoc = fullDoc.replace(pattern, replacement);
           await this.app.vault.modify(file, newDoc);
+
+          const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+          if (activeView && (activeView as any).previewMode) {
+            (activeView as any).previewMode.rerender(true);
+          }
         } else {
           new Notice("⚠️ 未能在文档中定位该批注位置");
         }
@@ -365,35 +405,36 @@ class AnnotationManageModal extends Modal {
 }
 
 // ==========================================
-// 4. Main Plugin
+// 4. Main Plugin Class
 // ==========================================
 export default class CriticMarkupPlugin extends Plugin {
   settings: CriticMarkupSettings = DEFAULT_SETTINGS;
   private floatingBtn: HTMLElement | null = null;
   private activeSelectedText = "";
+  private savedEditorRange: { from: EditorPosition; to: EditorPosition } | null = null;
 
   async onload() {
     activePluginInstance = this;
     await this.loadSettings();
 
-    // 1. Register CodeMirror 6 Visual Decorator for Editing View (Live Preview)
+    // 1. Live Preview CM6 ViewPlugin
     this.registerEditorExtension(this.buildEditorExtension());
 
-    // 2. Register Markdown Post Processor for Reading View (阅读视图)
+    // 2. Reading View PostProcessor (handles standard CriticMarkup & <mark> tags)
     this.registerReadingViewProcessor();
 
-    // 3. Setup Floating Toolbar (Desktop & Mobile Support)
+    // 3. Floating Toolbar (Desktop Mouse + Mobile Touch)
     this.setupFloatingToolbar();
 
-    // 4. Register Context Menu on Selection (Right Click / Mobile Selection Menu)
+    // 4. Mobile / Desktop Context Menu
     this.registerContextMenu();
 
-    // 5. Register Commands
+    // 5. Commands
     this.registerPluginCommands();
   }
 
   // --------------------------------------------------
-  // A. Editing View (Live Preview) CodeMirror Decorator
+  // A. Editing View CodeMirror Decorator
   // --------------------------------------------------
   private buildEditorExtension(): Extension {
     const criticMatcher = new MatchDecorator({
@@ -436,88 +477,86 @@ export default class CriticMarkupPlugin extends Plugin {
   }
 
   // --------------------------------------------------
-  // B. Reading View Markdown Post Processor (阅读视图渲染)
+  // B. Reading View Markdown Post Processor (Universal)
   // --------------------------------------------------
   private registerReadingViewProcessor() {
-    this.registerMarkdownPostProcessor((element: HTMLElement, context: MarkdownPostProcessorContext) => {
-      if (!this.settings.foldEnabled) return;
+    this.registerMarkdownPostProcessor(
+      (element: HTMLElement, context: MarkdownPostProcessorContext) => {
+        if (!this.settings.foldEnabled) return;
 
-      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
-      const textNodes: Text[] = [];
-      let node: Node | null;
-      while ((node = walker.nextNode())) {
-        textNodes.push(node as Text);
-      }
+        // Obsidian may render ==text== as <mark>text</mark> or leave it as plain text.
+        // We handle both block-level innerHTML replacements and TextNode traversals.
+        const blocks = element.querySelectorAll("p, li, h1, h2, h3, h4, h5, h6, blockquote");
+        const targets: Element[] = blocks.length > 0 ? Array.from(blocks) : [element];
 
-      const regex = /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g;
-
-      for (const textNode of textNodes) {
-        const val = textNode.nodeValue;
-        if (!val || !val.includes("{==")) continue;
-
-        regex.lastIndex = 0;
-        if (!regex.test(val)) continue;
-        regex.lastIndex = 0;
-
-        const frag = document.createDocumentFragment();
-        let lastIndex = 0;
-        let match;
-
-        while ((match = regex.exec(val)) !== null) {
-          const matchStart = match.index;
-          const matchEnd = match.index + match[0].length;
-          const origText = match[1];
-          const commentText = match[2];
-
-          if (matchStart > lastIndex) {
-            frag.appendChild(document.createTextNode(val.slice(lastIndex, matchStart)));
+        for (const block of targets) {
+          let html = block.innerHTML;
+          if (!html.includes("{") || (!html.includes(">>") && !html.includes("&gt;&gt;"))) {
+            continue;
           }
 
-          // Highlight text span
-          const hlSpan = document.createElement("span");
-          hlSpan.className = "cm-critic-highlight";
-          hlSpan.textContent = origText;
-          frag.appendChild(hlSpan);
+          // Regex matching:
+          // 1. Standard: {==orig==}{>>comm<<} or {==orig==}{&gt;&gt;comm&lt;&lt;}
+          // 2. HTML Marked: {<mark>orig</mark>}{>>comm<<} or {<mark>orig</mark>}{&gt;&gt;comm&lt;&lt;}
+          const criticRegex =
+            /\{(?:==|<mark>)([\s\S]*?)(?:==|<\/mark>)\}\{(?:>>|&gt;&gt;)([\s\S]*?)(?:<<|&lt;&lt;)\}/g;
 
-          // Golden capsule badge span
-          const badgeSpan = document.createElement("span");
-          badgeSpan.className = "cm-critic-badge";
-          badgeSpan.innerHTML = `💬 <span>${escapeHtml(commentText)}</span>`;
-          badgeSpan.title = `批注：${commentText} (点击查看或删除)`;
+          if (criticRegex.test(html)) {
+            criticRegex.lastIndex = 0;
+            const newHtml = html.replace(
+              criticRegex,
+              (m, orig, comm) => {
+                const cleanOrig = orig.replace(/<[^>]+>/g, "").trim();
+                const cleanComm = comm.replace(/<[^>]+>/g, "").trim();
+                return `<span class="cm-critic-highlight">${escapeHtml(
+                  cleanOrig
+                )}</span><span class="cm-critic-badge" data-orig="${encodeURIComponent(
+                  cleanOrig
+                )}" data-comm="${encodeURIComponent(
+                  cleanComm
+                )}">💬 <span>${escapeHtml(cleanComm)}</span></span>`;
+              }
+            );
 
-          const handleBadgeClick = (e: Event) => {
-            e.stopPropagation();
-            e.preventDefault();
-            const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-            const targetFile = activeView?.file;
-            if (targetFile) {
-              new AnnotationManageModal(
-                this.app,
-                { type: "file", file: targetFile },
-                origText,
-                commentText
-              ).open();
-            }
-          };
+            block.innerHTML = newHtml;
 
-          badgeSpan.addEventListener("click", handleBadgeClick);
-          badgeSpan.addEventListener("touchend", handleBadgeClick);
-          frag.appendChild(badgeSpan);
+            // Bind click and touch events to newly created badges
+            const badges = block.querySelectorAll(".cm-critic-badge");
+            badges.forEach((badge) => {
+              const origText = decodeURIComponent(
+                badge.getAttribute("data-orig") || ""
+              );
+              const commText = decodeURIComponent(
+                badge.getAttribute("data-comm") || ""
+              );
 
-          lastIndex = matchEnd;
+              const handleBadgeAction = (e: Event) => {
+                e.stopPropagation();
+                e.preventDefault();
+                const activeView =
+                  this.app.workspace.getActiveViewOfType(MarkdownView);
+                const targetFile = activeView?.file;
+                if (targetFile) {
+                  new AnnotationManageModal(
+                    this.app,
+                    { type: "file", file: targetFile },
+                    origText,
+                    commText
+                  ).open();
+                }
+              };
+
+              badge.addEventListener("click", handleBadgeAction);
+              badge.addEventListener("touchend", handleBadgeAction);
+            });
+          }
         }
-
-        if (lastIndex < val.length) {
-          frag.appendChild(document.createTextNode(val.slice(lastIndex)));
-        }
-
-        textNode.replaceWith(frag);
       }
-    });
+    );
   }
 
   // --------------------------------------------------
-  // C. Floating Toolbar (Desktop Mouse & Mobile Touch)
+  // C. Floating Toolbar (Desktop Mouse + Mobile Touch)
   // --------------------------------------------------
   private setupFloatingToolbar() {
     this.floatingBtn = document.createElement("div");
@@ -532,10 +571,18 @@ export default class CriticMarkupPlugin extends Plugin {
         return;
       }
 
-      // Check both editor selection and DOM selection
       let sel = "";
+      this.savedEditorRange = null;
+
       if (activeView.getMode() === "source" && activeView.editor) {
-        sel = activeView.editor.getSelection().trim();
+        const editor = activeView.editor;
+        sel = editor.getSelection().trim();
+        if (sel) {
+          this.savedEditorRange = {
+            from: editor.getCursor("from"),
+            to: editor.getCursor("to"),
+          };
+        }
       }
 
       const domSel = window.getSelection();
@@ -554,9 +601,8 @@ export default class CriticMarkupPlugin extends Plugin {
         const range = domSel.getRangeAt(0);
         const rect = range.getBoundingClientRect();
         if (rect && rect.width > 0) {
-          // Position above selection or adjust for viewport bounds
           let top = rect.top - 42;
-          if (top < 12) top = rect.bottom + 10; // place below if clipped at top
+          if (top < 12) top = rect.bottom + 10;
           let left = rect.left + rect.width / 2 - 40;
           left = Math.max(12, Math.min(window.innerWidth - 95, left));
 
@@ -572,12 +618,10 @@ export default class CriticMarkupPlugin extends Plugin {
       this.hideFloatingBtn();
     };
 
-    // Desktop events
+    // Listen to both mouse and touch events
     this.registerDomEvent(document, "mouseup", () => setTimeout(updateBtn, 80));
-    this.registerDomEvent(document, "selectionchange", () => setTimeout(updateBtn, 100));
-
-    // Mobile touch events
     this.registerDomEvent(document, "touchend", () => setTimeout(updateBtn, 120));
+    this.registerDomEvent(document, "selectionchange", () => setTimeout(updateBtn, 100));
 
     const triggerAnnotation = (e: Event) => {
       e.preventDefault();
@@ -590,13 +634,25 @@ export default class CriticMarkupPlugin extends Plugin {
       }
 
       const txt = this.activeSelectedText;
+      const savedRange = this.savedEditorRange;
       this.hideFloatingBtn();
 
       if (activeView.getMode() === "source" && activeView.editor) {
-        new AddAnnotationModal(this.app, { type: "editor", editor: activeView.editor }, txt).open();
+        new AddAnnotationModal(
+          this.app,
+          {
+            type: "editor",
+            editor: activeView.editor,
+            range: savedRange || undefined,
+          },
+          txt
+        ).open();
       } else if (activeView.file) {
-        // Reading View
-        new AddAnnotationModal(this.app, { type: "file", file: activeView.file }, txt).open();
+        new AddAnnotationModal(
+          this.app,
+          { type: "file", file: activeView.file },
+          txt
+        ).open();
       }
     };
 
@@ -609,6 +665,7 @@ export default class CriticMarkupPlugin extends Plugin {
       this.floatingBtn.style.display = "none";
     }
     this.activeSelectedText = "";
+    this.savedEditorRange = null;
   }
 
   // --------------------------------------------------
@@ -619,12 +676,18 @@ export default class CriticMarkupPlugin extends Plugin {
       this.app.workspace.on("editor-menu", (menu, editor, view) => {
         const sel = editor.getSelection().trim();
         if (sel) {
+          const from = editor.getCursor("from");
+          const to = editor.getCursor("to");
           menu.addItem((item) => {
             item
               .setTitle("📝 添加划词批注 (CriticFlow)")
               .setIcon("highlighter")
               .onClick(() => {
-                new AddAnnotationModal(this.app, { type: "editor", editor }, sel).open();
+                new AddAnnotationModal(
+                  this.app,
+                  { type: "editor", editor, range: { from, to } },
+                  sel
+                ).open();
               });
           });
         }
@@ -636,7 +699,7 @@ export default class CriticMarkupPlugin extends Plugin {
   // E. Commands
   // --------------------------------------------------
   private registerPluginCommands() {
-    // 1. Add Annotation
+    // 1. Add Annotation Command
     this.addCommand({
       id: "criticmarkup-add-annotation",
       name: "添加划词批注 (Add Annotation)",
@@ -648,8 +711,16 @@ export default class CriticMarkupPlugin extends Plugin {
         }
 
         let selection = "";
+        let savedRange: { from: EditorPosition; to: EditorPosition } | undefined = undefined;
+
         if (activeView.getMode() === "source" && activeView.editor) {
           selection = activeView.editor.getSelection().trim();
+          if (selection) {
+            savedRange = {
+              from: activeView.editor.getCursor("from"),
+              to: activeView.editor.getCursor("to"),
+            };
+          }
         }
         if (!selection) {
           const domSel = window.getSelection();
@@ -664,9 +735,17 @@ export default class CriticMarkupPlugin extends Plugin {
         }
 
         if (activeView.getMode() === "source" && activeView.editor) {
-          new AddAnnotationModal(this.app, { type: "editor", editor: activeView.editor }, selection).open();
+          new AddAnnotationModal(
+            this.app,
+            { type: "editor", editor: activeView.editor, range: savedRange },
+            selection
+          ).open();
         } else if (activeView.file) {
-          new AddAnnotationModal(this.app, { type: "file", file: activeView.file }, selection).open();
+          new AddAnnotationModal(
+            this.app,
+            { type: "file", file: activeView.file },
+            selection
+          ).open();
         }
       },
       hotkeys: [
@@ -677,7 +756,7 @@ export default class CriticMarkupPlugin extends Plugin {
       ],
     });
 
-    // 2. Extract All Annotations for AI Agent (Dual Mode)
+    // 2. Extract All Annotations for AI Agent
     this.addCommand({
       id: "criticmarkup-extract-annotations",
       name: "一键提取全文档批注为 Agent 指令 (Extract for Agent)",
@@ -727,7 +806,9 @@ export default class CriticMarkupPlugin extends Plugin {
         report += `请严格根据上述批注修改对应文件并保存，保持其他无关内容不变。\n`;
 
         await navigator.clipboard.writeText(report);
-        new Notice(`✅ 已将全部 ${matches.length} 条批注复制到剪贴板！可以直接发给 AI Agent。`);
+        new Notice(
+          `✅ 已将全部 ${matches.length} 条批注复制到剪贴板！可以直接发给 AI Agent。`
+        );
       },
       hotkeys: [
         {
