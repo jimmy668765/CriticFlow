@@ -32,17 +32,26 @@ class CriticBadgeWidget extends view_1.WidgetType {
         badge.className = "cm-critic-badge";
         badge.innerHTML = `💬 <span>${escapeHtml(this.comment)}</span>`;
         badge.title = `批注：${this.comment} (点击查看或删除)`;
-        badge.addEventListener("click", (e) => {
+        const handleOpen = (e) => {
             e.stopPropagation();
             e.preventDefault();
             if (activePluginInstance) {
                 new AnnotationManageModal(activePluginInstance.app, view, this.original, this.comment).open();
             }
-        });
+        };
+        badge.addEventListener("click", handleOpen);
+        badge.addEventListener("touchend", handleOpen);
+        badge.addEventListener("pointerup", handleOpen);
         return badge;
     }
     ignoreEvent(e) {
-        return e.type === "click" || e.type === "mousedown";
+        return (e.type === "click" ||
+            e.type === "mousedown" ||
+            e.type === "mouseup" ||
+            e.type === "touchstart" ||
+            e.type === "touchend" ||
+            e.type === "pointerdown" ||
+            e.type === "pointerup");
     }
 }
 // Annotation Input Modal (新增批注)
@@ -63,11 +72,11 @@ class AddAnnotationModal extends obsidian_1.Modal {
             cls: "critic-quote-box",
             text: `“${this.selectedText}”`,
         });
-        quoteBox.style.cssText = "padding: 8px 12px; border-radius: 8px; background: rgba(234, 179, 8, 0.12); border-left: 3px solid #eab308; margin-bottom: 12px; font-size: 13px;";
+        quoteBox.style.cssText = "padding: 8px 12px; border-radius: 8px; background: rgba(234, 179, 8, 0.12); border-left: 3px solid #eab308; margin-bottom: 12px; font-size: 13px; word-break: break-word;";
         // Textarea
         const textarea = contentEl.createEl("textarea");
         textarea.placeholder = "输入修改意见 / 批注内容 (按 ⌘+Enter 插入)...";
-        textarea.style.cssText = "width: 100%; height: 75px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid var(--background-modifier-border);";
+        textarea.style.cssText = "width: 100%; height: 75px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid var(--background-modifier-border); font-size: 14px;";
         textarea.addEventListener("input", () => {
             this.comment = textarea.value;
         });
@@ -84,7 +93,7 @@ class AddAnnotationModal extends obsidian_1.Modal {
         cancelBtn.onclick = () => this.close();
         const submitBtn = footer.createEl("button", { text: "✍️ 插入批注 (⌘↵)", cls: "mod-cta" });
         submitBtn.onclick = () => this.submit();
-        setTimeout(() => textarea.focus(), 50);
+        setTimeout(() => textarea.focus(), 60);
     }
     submit() {
         const text = this.comment.trim();
@@ -93,9 +102,34 @@ class AddAnnotationModal extends obsidian_1.Modal {
             return;
         }
         const critic = `{==${this.selectedText.trim()}==}{>>${text}<<}`;
-        this.editor.replaceSelection(critic);
+        // Robust replacement: handles mobile touch selection collapse on modal blur
+        try {
+            const curSel = this.editor.getSelection();
+            if (curSel && curSel.trim() === this.selectedText.trim()) {
+                this.editor.replaceSelection(critic);
+            }
+            else {
+                const cursor = this.editor.getCursor();
+                const lineText = this.editor.getLine(cursor.line);
+                const idx = lineText.indexOf(this.selectedText.trim());
+                if (idx !== -1) {
+                    this.editor.replaceRange(critic, { line: cursor.line, ch: idx }, { line: cursor.line, ch: idx + this.selectedText.trim().length });
+                }
+                else {
+                    this.editor.replaceSelection(critic);
+                }
+            }
+        }
+        catch (err) {
+            this.editor.replaceSelection(critic);
+        }
         this.close();
-        new obsidian_1.Notice("✅ 已在文档中插入批注！");
+        this.editor.focus();
+        // Trigger workspace update so CM6 decorator and preview refresh immediately
+        if (activePluginInstance) {
+            activePluginInstance.app.workspace.updateOptions();
+        }
+        new obsidian_1.Notice("✅ 已插入批注！");
     }
     onClose() {
         this.contentEl.empty();
@@ -117,15 +151,15 @@ class AnnotationManageModal extends obsidian_1.Modal {
         const quoteBox = contentEl.createEl("div", {
             text: `“${this.originalText}”`,
         });
-        quoteBox.style.cssText = "padding: 8px 12px; border-radius: 8px; background: rgba(234, 179, 8, 0.12); border-left: 3px solid #eab308; margin-bottom: 12px; font-size: 13px;";
+        quoteBox.style.cssText = "padding: 8px 12px; border-radius: 8px; background: rgba(234, 179, 8, 0.12); border-left: 3px solid #eab308; margin-bottom: 12px; font-size: 13px; word-break: break-word;";
         // Editable comment textarea
         const textarea = contentEl.createEl("textarea");
         textarea.value = this.comment;
-        textarea.style.cssText = "width: 100%; height: 75px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid var(--background-modifier-border);";
+        textarea.style.cssText = "width: 100%; height: 75px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid var(--background-modifier-border); font-size: 14px;";
         // Footer
         const footer = contentEl.createEl("div");
         footer.style.cssText = "display: flex; justify-content: space-between; align-items: center;";
-        const deleteBtn = footer.createEl("button", { text: "🗑️ 删除此批注", cls: "mod-warning" });
+        const deleteBtn = footer.createEl("button", { text: "🗑️ 删除批注", cls: "mod-warning" });
         deleteBtn.onclick = () => {
             this.updateInDoc(null);
             this.close();
@@ -152,7 +186,7 @@ class AnnotationManageModal extends obsidian_1.Modal {
                 saveBtn.click();
             }
         });
-        setTimeout(() => textarea.focus(), 50);
+        setTimeout(() => textarea.focus(), 60);
     }
     updateInDoc(newCommentOrNull) {
         const fullDoc = this.view.state.doc.toString();
@@ -178,6 +212,9 @@ class AnnotationManageModal extends obsidian_1.Modal {
             this.view.dispatch({
                 changes: { from, to, insert: replacement },
             });
+            if (activePluginInstance) {
+                activePluginInstance.app.workspace.updateOptions();
+            }
         }
     }
     onClose() {
@@ -233,6 +270,12 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                     badge.className = "cm-critic-badge";
                     badge.innerHTML = `💬 <span>${escapeHtml(comment)}</span>`;
                     badge.title = `批注：${comment}`;
+                    const handleOpen = (e) => {
+                        e.stopPropagation();
+                        new obsidian_1.Notice(`💬 批注：${comment}`);
+                    };
+                    badge.addEventListener("click", handleOpen);
+                    badge.addEventListener("touchend", handleOpen);
                     mark.appendChild(badge);
                     fragment.appendChild(mark);
                     lastIndex = regex.lastIndex;
@@ -245,14 +288,46 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 }
             });
         });
-        // 3. Setup Floating Toolbar on Mouse Selection
+        // 3. Setup Floating Toolbar (Touch + Mouse + Selection change)
         this.setupFloatingToolbar();
-        // 4. Register Commands
+        // 4. Setup Native Editor Menu (Right Click & Mobile Long-Press / Action Menu)
+        this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor) => {
+            let sel = editor.getSelection().trim();
+            if (!sel) {
+                try {
+                    const domSel = window.getSelection();
+                    if (domSel && !domSel.isCollapsed) {
+                        sel = domSel.toString().trim();
+                    }
+                }
+                catch { }
+            }
+            if (sel) {
+                menu.addItem((item) => {
+                    item
+                        .setTitle("✍️ 添加批注 (CriticFlow)")
+                        .setIcon("message-square")
+                        .onClick(() => {
+                        new AddAnnotationModal(this.app, editor, sel).open();
+                    });
+                });
+            }
+        }));
+        // 5. Register Commands
         this.addCommand({
             id: "criticmarkup-add-annotation",
             name: "添加划词批注 (Add Annotation)",
             editorCallback: (editor) => {
-                const selection = editor.getSelection().trim();
+                let selection = editor.getSelection().trim();
+                if (!selection) {
+                    try {
+                        const domSel = window.getSelection();
+                        if (domSel && !domSel.isCollapsed) {
+                            selection = domSel.toString().trim();
+                        }
+                    }
+                    catch { }
+                }
                 if (!selection) {
                     new obsidian_1.Notice("请先划选要批注的一段文字");
                     return;
@@ -321,6 +396,29 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 },
             ],
         });
+        // 6. Mobile Ribbon Icon
+        this.addRibbonIcon("message-square", "CriticFlow 划词批注", () => {
+            const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
+            if (!activeView || !activeView.editor) {
+                new obsidian_1.Notice("请先打开一篇笔记");
+                return;
+            }
+            let sel = activeView.editor.getSelection().trim();
+            if (!sel) {
+                try {
+                    const domSel = window.getSelection();
+                    if (domSel && !domSel.isCollapsed) {
+                        sel = domSel.toString().trim();
+                    }
+                }
+                catch { }
+            }
+            if (!sel) {
+                new obsidian_1.Notice("请先划选一段文字再点击批注");
+                return;
+            }
+            new AddAnnotationModal(this.app, activeView.editor, sel).open();
+        });
         console.log("[CriticFlow] Plugin loaded successfully!");
         new obsidian_1.Notice("⚡️ CriticFlow 划词批注插件已激活！");
     }
@@ -356,6 +454,8 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
         });
     }
     setupFloatingToolbar() {
+        if (this.floatingBtn)
+            this.floatingBtn.remove();
         this.floatingBtn = document.createElement("div");
         this.floatingBtn.id = "obsidian-floating-annotate-btn";
         this.floatingBtn.innerHTML = `<span style="color:#eab308;font-size:13px;">📝</span><span>批注</span>`;
@@ -367,34 +467,52 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                     this.floatingBtn.style.display = "none";
                 return;
             }
-            const sel = activeView.editor.getSelection().trim();
-            if (!sel) {
+            let text = activeView.editor.getSelection().trim();
+            let rect = null;
+            try {
+                const domSel = window.getSelection();
+                if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
+                    if (!text)
+                        text = domSel.toString().trim();
+                    rect = domSel.getRangeAt(0).getBoundingClientRect();
+                }
+            }
+            catch { }
+            if (!text || text.length === 0) {
                 if (this.floatingBtn)
                     this.floatingBtn.style.display = "none";
                 this.activeSelectedText = "";
                 return;
             }
-            this.activeSelectedText = sel;
-            const domSel = window.getSelection();
-            if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-                const rect = domSel.getRangeAt(0).getBoundingClientRect();
-                if (rect && rect.width > 0) {
-                    const top = Math.max(12, rect.top - 38);
-                    const left = Math.min(window.innerWidth - 90, Math.max(12, rect.left + rect.width / 2 - 38));
-                    if (this.floatingBtn) {
-                        this.floatingBtn.style.top = `${top}px`;
-                        this.floatingBtn.style.left = `${left}px`;
-                        this.floatingBtn.style.display = "inline-flex";
+            this.activeSelectedText = text;
+            if (!rect || (rect.width === 0 && rect.height === 0)) {
+                // Fallback for mobile / touch handles
+                try {
+                    const coords = activeView.editor.coordsAtPos?.(activeView.editor.posToOffset(activeView.editor.getCursor("from")));
+                    if (coords) {
+                        rect = { top: coords.top, left: coords.left, width: 40, height: 20 };
                     }
-                    return;
                 }
+                catch { }
             }
-            if (this.floatingBtn)
-                this.floatingBtn.style.display = "none";
+            if (!rect || (rect.width === 0 && rect.height === 0)) {
+                if (this.floatingBtn)
+                    this.floatingBtn.style.display = "none";
+                return;
+            }
+            const top = Math.max(12, rect.top - 42);
+            const left = Math.min(window.innerWidth - 90, Math.max(12, rect.left + (rect.width || 40) / 2 - 36));
+            if (this.floatingBtn) {
+                this.floatingBtn.style.top = `${top}px`;
+                this.floatingBtn.style.left = `${left}px`;
+                this.floatingBtn.style.display = "inline-flex";
+            }
         };
+        // Both mouse and touch listeners for desktop & mobile
         this.registerDomEvent(document, "mouseup", () => setTimeout(updateBtn, 60));
-        this.registerDomEvent(document, "selectionchange", () => setTimeout(updateBtn, 80));
-        this.floatingBtn.addEventListener("mousedown", (e) => {
+        this.registerDomEvent(document, "touchend", () => setTimeout(updateBtn, 120));
+        this.registerDomEvent(document, "selectionchange", () => setTimeout(updateBtn, 100));
+        const handleTrigger = (e) => {
             e.preventDefault();
             e.stopPropagation();
             const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
@@ -404,7 +522,9 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                     this.floatingBtn.style.display = "none";
                 new AddAnnotationModal(this.app, activeView.editor, txt).open();
             }
-        });
+        };
+        this.floatingBtn.addEventListener("mousedown", handleTrigger);
+        this.floatingBtn.addEventListener("touchstart", handleTrigger);
     }
     onunload() {
         activePluginInstance = null;
