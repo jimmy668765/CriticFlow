@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-criticmarkup",
+  "name": "CriticMarkup Annotate & Review",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Visual inline annotations, floating mouse-selection toolbar, and CriticMarkup folding for human-agent collaboration.",
+  "author": "Jermy & TARS",
+  "authorUrl": "https://github.com/jimmy668765",
+  "isDesktopOnly": false
+}

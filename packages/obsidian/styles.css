@@ -1,0 +1,61 @@
+/* CriticMarkup Visual Highlight & Capsule Badge for Obsidian */
+
+.cm-critic-highlight {
+  background-color: rgba(234, 179, 8, 0.22) !important;
+  border-bottom: 2px solid #eab308 !important;
+  border-radius: 3px !important;
+  padding: 1px 2px !important;
+}
+
+.cm-critic-badge {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 3px !important;
+  background: linear-gradient(135deg, #eab308, #ca8a04) !important;
+  color: #18181b !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  line-height: 1.2 !important;
+  padding: 1px 7px !important;
+  border-radius: 12px !important;
+  margin-left: 5px !important;
+  vertical-align: 1px !important;
+  cursor: pointer !important;
+  user-select: none !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28) !important;
+  transition: transform 0.1s ease, filter 0.1s ease !important;
+}
+
+.cm-critic-badge:hover {
+  transform: scale(1.08) !important;
+  filter: brightness(1.1) !important;
+}
+
+#obsidian-floating-annotate-btn {
+  position: fixed;
+  z-index: 999997;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 16px;
+  background-color: rgba(22, 26, 34, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  display: none;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  user-select: none;
+}
+
+#obsidian-floating-annotate-btn:hover {
+  background-color: rgba(35, 40, 52, 0.98);
+  border-color: #eab308;
+  transform: scale(1.04);
+}
