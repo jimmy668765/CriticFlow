@@ -67,7 +67,7 @@ class AddAnnotationModal extends obsidian_1.Modal {
         // Textarea
         const textarea = contentEl.createEl("textarea");
         textarea.placeholder = "输入修改意见 / 批注内容 (按 ⌘+Enter 插入)...";
-        textarea.style.cssText = "width: 100%; height: 75px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px;";
+        textarea.style.cssText = "width: 100%; height: 75px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid var(--background-modifier-border);";
         textarea.addEventListener("input", () => {
             this.comment = textarea.value;
         });
@@ -121,7 +121,7 @@ class AnnotationManageModal extends obsidian_1.Modal {
         // Editable comment textarea
         const textarea = contentEl.createEl("textarea");
         textarea.value = this.comment;
-        textarea.style.cssText = "width: 100%; height: 75px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px;";
+        textarea.style.cssText = "width: 100%; height: 75px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid var(--background-modifier-border);";
         // Footer
         const footer = contentEl.createEl("div");
         footer.style.cssText = "display: flex; justify-content: space-between; align-items: center;";
@@ -194,11 +194,60 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
     async onload() {
         activePluginInstance = this;
         await this.loadSettings();
-        // 1. Register CodeMirror 6 Visual Decorator
+        // 1. Register CodeMirror 6 Visual Decorator (for Live Preview / Editing View)
         this.registerEditorExtension(this.buildEditorExtension());
-        // 2. Setup Floating Toolbar on Mouse Selection
+        // 2. Register Markdown Post Processor (for Reading View)
+        this.registerMarkdownPostProcessor((element) => {
+            if (!this.settings.foldEnabled)
+                return;
+            const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+            let node;
+            const nodesToReplace = [];
+            const regex = /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g;
+            while ((node = walker.nextNode())) {
+                if (node.nodeValue && node.nodeValue.includes("{==") && node.nodeValue.includes("<<}")) {
+                    const parent = node.parentElement;
+                    if (parent && !parent.closest("pre, code")) {
+                        nodesToReplace.push(node);
+                    }
+                }
+            }
+            nodesToReplace.forEach((textNode) => {
+                const text = textNode.nodeValue || "";
+                if (!regex.test(text))
+                    return;
+                regex.lastIndex = 0;
+                const fragment = document.createDocumentFragment();
+                let lastIndex = 0;
+                let match;
+                while ((match = regex.exec(text)) !== null) {
+                    const before = text.slice(lastIndex, match.index);
+                    if (before)
+                        fragment.appendChild(document.createTextNode(before));
+                    const originalText = match[1];
+                    const comment = match[2];
+                    const mark = document.createElement("mark");
+                    mark.className = "cm-critic-highlight";
+                    mark.textContent = originalText;
+                    const badge = document.createElement("span");
+                    badge.className = "cm-critic-badge";
+                    badge.innerHTML = `💬 <span>${escapeHtml(comment)}</span>`;
+                    badge.title = `批注：${comment}`;
+                    mark.appendChild(badge);
+                    fragment.appendChild(mark);
+                    lastIndex = regex.lastIndex;
+                }
+                const remaining = text.slice(lastIndex);
+                if (remaining)
+                    fragment.appendChild(document.createTextNode(remaining));
+                if (textNode.parentNode) {
+                    textNode.parentNode.replaceChild(fragment, textNode);
+                }
+            });
+        });
+        // 3. Setup Floating Toolbar on Mouse Selection
         this.setupFloatingToolbar();
-        // 3. Register Commands
+        // 4. Register Commands
         this.addCommand({
             id: "criticmarkup-add-annotation",
             name: "添加划词批注 (Add Annotation)",
@@ -272,6 +321,8 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 },
             ],
         });
+        console.log("[CriticFlow] Plugin loaded successfully!");
+        new obsidian_1.Notice("⚡️ CriticFlow 划词批注插件已激活！");
     }
     buildEditorExtension() {
         const criticMatcher = new view_1.MatchDecorator({
@@ -370,3 +421,6 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
     }
 }
 exports.default = CriticMarkupPlugin;
+
+module.exports = CriticMarkupPlugin;
+module.exports.default = CriticMarkupPlugin;
