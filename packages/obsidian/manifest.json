@@ -1,7 +1,7 @@
 {
-  "id": "obsidian-criticmarkup",
+  "id": "criticflow-annotate",
   "name": "CriticMarkup Annotate & Review",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "minAppVersion": "0.15.0",
   "description": "Visual inline annotations, floating mouse-selection toolbar, and CriticMarkup folding for human-agent collaboration.",
   "author": "Jermy & TARS",

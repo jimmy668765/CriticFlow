@@ -23,7 +23,15 @@ function escapeRegExp(str) {
 let activePluginInstance = null;
 let lastActionTimestamp = 0;
 
-// Universal context resolver across Desktop & Mobile
+function isMobileDevice() {
+    return (
+        window.innerWidth <= 768 ||
+        "ontouchstart" in window ||
+        navigator.maxTouchPoints > 0
+    );
+}
+
+// 4-tier context resolver across Desktop & Mobile
 function resolveActiveContext(app) {
     let view = app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
 
@@ -52,10 +60,9 @@ function resolveActiveContext(app) {
     return { view, file, editor: view?.editor };
 }
 
-// Anti-ghost-click action runner
 function safeRunAction(action) {
     const now = Date.now();
-    if (now - lastActionTimestamp < 380) {
+    if (now - lastActionTimestamp < 350) {
         return;
     }
     lastActionTimestamp = now;
@@ -68,7 +75,7 @@ function closeAllCriticModals() {
 }
 
 /**
- * 1. 新建划词批注弹窗 (纯原生 DOM 浮层，不受任何框架生命周期影响)
+ * 1. 新建划词批注弹窗
  */
 function openAddAnnotationModal(app, selectedText, savedRange) {
     closeAllCriticModals();
@@ -78,7 +85,7 @@ function openAddAnnotationModal(app, selectedText, savedRange) {
     overlay.style.cssText = `
         position: fixed;
         top: 0; left: 0; width: 100vw; height: 100vh;
-        background-color: rgba(0, 0, 0, 0.65);
+        background-color: rgba(0, 0, 0, 0.7);
         backdrop-filter: blur(8px);
         -webkit-backdrop-filter: blur(8px);
         z-index: 99999999;
@@ -94,10 +101,10 @@ function openAddAnnotationModal(app, selectedText, savedRange) {
     modal.style.cssText = `
         width: 100%;
         max-width: 440px;
-        background-color: #1c1c1f;
-        border: 1px solid rgba(255, 255, 255, 0.18);
+        background-color: #18181b;
+        border: 1px solid rgba(255, 255, 255, 0.2);
         border-radius: 14px;
-        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+        box-shadow: 0 20px 48px rgba(0, 0, 0, 0.7);
         padding: 18px 20px;
         color: #ffffff;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -116,7 +123,7 @@ function openAddAnnotationModal(app, selectedText, savedRange) {
     quoteBox.style.cssText = `
         padding: 8px 12px;
         border-radius: 8px;
-        background: rgba(234, 179, 8, 0.14);
+        background: rgba(234, 179, 8, 0.15);
         border-left: 3px solid #eab308;
         color: #fef08a;
         font-size: 13px;
@@ -129,7 +136,7 @@ function openAddAnnotationModal(app, selectedText, savedRange) {
     modal.appendChild(quoteBox);
 
     const textarea = document.createElement("textarea");
-    textarea.placeholder = "输入批注内容 / 修改建议 (按 ⌘+Enter 插入)...";
+    textarea.placeholder = "输入修改建议或批注内容 (按 ⌘+Enter 插入)...";
     textarea.style.cssText = `
         width: 100%;
         height: 85px;
@@ -161,7 +168,10 @@ function openAddAnnotationModal(app, selectedText, savedRange) {
         font-weight: 600;
         cursor: pointer;
     `;
-    cancelBtn.onclick = () => overlay.remove();
+    cancelBtn.onclick = () => {
+        overlay.remove();
+        activePluginInstance?.resetSelectionState();
+    };
 
     const submitBtn = document.createElement("button");
     submitBtn.textContent = "✍️ 插入批注";
@@ -222,8 +232,13 @@ function openAddAnnotationModal(app, selectedText, savedRange) {
                     const newContent = oldContent.replace(pattern, critic);
                     await app.vault.modify(file, newContent);
                     new obsidian_1.Notice("✅ 已在文件中插入批注！");
-                    if (ctx.view && ctx.view.previewMode) {
-                        ctx.view.previewMode.rerender(true);
+
+                    if (ctx.view) {
+                        if (ctx.view.leaf && ctx.view.leaf.rebuildView) {
+                            ctx.view.leaf.rebuildView();
+                        } else if (ctx.view.previewMode && ctx.view.previewMode.rerender) {
+                            ctx.view.previewMode.rerender(true);
+                        }
                     }
                 } else {
                     new obsidian_1.Notice("⚠️ 未能在原文中定位选区");
@@ -234,6 +249,7 @@ function openAddAnnotationModal(app, selectedText, savedRange) {
         }
 
         overlay.remove();
+        activePluginInstance?.resetSelectionState();
     };
 
     submitBtn.onclick = () => safeRunAction(doSubmit);
@@ -241,13 +257,13 @@ function openAddAnnotationModal(app, selectedText, savedRange) {
     footer.appendChild(cancelBtn);
     footer.appendChild(submitBtn);
     modal.appendChild(footer);
-
     overlay.appendChild(modal);
 
     const openTime = Date.now();
     overlay.addEventListener("click", (e) => {
         if (e.target === overlay && Date.now() - openTime > 400) {
             overlay.remove();
+            activePluginInstance?.resetSelectionState();
         }
     });
 
@@ -258,6 +274,7 @@ function openAddAnnotationModal(app, selectedText, savedRange) {
         }
         if (e.key === "Escape") {
             overlay.remove();
+            activePluginInstance?.resetSelectionState();
         }
     });
 
@@ -276,7 +293,7 @@ function openAnnotationManageModal(app, originalText, comment, editorView) {
     overlay.style.cssText = `
         position: fixed;
         top: 0; left: 0; width: 100vw; height: 100vh;
-        background-color: rgba(0, 0, 0, 0.65);
+        background-color: rgba(0, 0, 0, 0.7);
         backdrop-filter: blur(8px);
         -webkit-backdrop-filter: blur(8px);
         z-index: 99999999;
@@ -292,10 +309,10 @@ function openAnnotationManageModal(app, originalText, comment, editorView) {
     modal.style.cssText = `
         width: 100%;
         max-width: 440px;
-        background-color: #1c1c1f;
-        border: 1px solid rgba(255, 255, 255, 0.18);
+        background-color: #18181b;
+        border: 1px solid rgba(255, 255, 255, 0.2);
         border-radius: 14px;
-        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+        box-shadow: 0 20px 48px rgba(0, 0, 0, 0.7);
         padding: 18px 20px;
         color: #ffffff;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -314,7 +331,7 @@ function openAnnotationManageModal(app, originalText, comment, editorView) {
     quoteBox.style.cssText = `
         padding: 8px 12px;
         border-radius: 8px;
-        background: rgba(234, 179, 8, 0.14);
+        background: rgba(234, 179, 8, 0.15);
         border-left: 3px solid #eab308;
         color: #fef08a;
         font-size: 13px;
@@ -440,8 +457,12 @@ function openAnnotationManageModal(app, originalText, comment, editorView) {
                     if (pattern.test(fullDoc)) {
                         const replacement = newCommentOrNull === null ? cleanOrig : `{==${cleanOrig}==}{>>${newCommentOrNull.trim()}<<}`;
                         await app.vault.modify(file, fullDoc.replace(pattern, replacement));
-                        if (ctx.view && ctx.view.previewMode) {
-                            ctx.view.previewMode.rerender(true);
+                        if (ctx.view) {
+                            if (ctx.view.leaf && ctx.view.leaf.rebuildView) {
+                                ctx.view.leaf.rebuildView();
+                            } else if (ctx.view.previewMode && ctx.view.previewMode.rerender) {
+                                ctx.view.previewMode.rerender(true);
+                            }
                         }
                     }
                 } catch (err) {
@@ -469,7 +490,6 @@ function openAnnotationManageModal(app, originalText, comment, editorView) {
     rightGroup.appendChild(saveBtn);
     footer.appendChild(rightGroup);
     modal.appendChild(footer);
-
     overlay.appendChild(modal);
 
     const openTime = Date.now();
@@ -537,7 +557,7 @@ class CriticBadgeWidget extends view_1.WidgetType {
 }
 
 // ==========================================
-// 4. Main Plugin Class
+// 4. Main Plugin Class (v1.1.0)
 // ==========================================
 class CriticMarkupPlugin extends obsidian_1.Plugin {
     constructor() {
@@ -546,22 +566,31 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
         this.floatingBtn = null;
         this.activeSelectedText = "";
         this.savedEditorRange = null;
+        this.updatePending = false;
     }
     async onload() {
         activePluginInstance = this;
         await this.loadSettings();
 
-        // 1. CM6 Extension for Editing View
+        // 1. CM6 Extension for Live Preview
         this.registerEditorExtension(this.buildEditorExtension());
 
         // 2. Reading View PostProcessor
         this.registerReadingViewProcessor();
 
-        // 3. Floating Toolbar
+        // 3. Floating Toolbar (Dual positioning for Mobile/Desktop)
         this.setupFloatingToolbar();
 
         // 4. Commands
         this.registerPluginCommands();
+    }
+
+    resetSelectionState() {
+        this.activeSelectedText = "";
+        this.savedEditorRange = null;
+        if (this.floatingBtn) {
+            this.floatingBtn.style.display = "none";
+        }
     }
 
     buildEditorExtension() {
@@ -605,7 +634,7 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
         this.registerMarkdownPostProcessor((element) => {
             if (!this.settings.foldEnabled) return;
 
-            const blocks = element.querySelectorAll("p, li, h1, h2, h3, h4, h5, h6, blockquote");
+            const blocks = element.querySelectorAll("p, li, h1, h2, h3, h4, h5, h6, blockquote, div.markdown-preview-section");
             const targets = blocks.length > 0 ? Array.from(blocks) : [element];
 
             for (const block of targets) {
@@ -615,7 +644,7 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 }
 
                 const criticRegex =
-                    /\{(?:==|<mark>)([\s\S]*?)(?:==|<\/mark>)\}\{(?:>>|&gt;&gt;)([\s\S]*?)(?:<<|&lt;&lt;)\}/g;
+                    /\{(?:==|<mark[^>]*>)([\s\S]*?)(?:==|<\/mark>)\}\{(?:>>|&gt;&gt;)([\s\S]*?)(?:<<|&lt;&lt;)\}/g;
 
                 if (criticRegex.test(html)) {
                     criticRegex.lastIndex = 0;
@@ -660,57 +689,18 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
         this.floatingBtn.innerHTML = `<span style="color:#eab308;font-size:13px;">📝</span><span>批注</span>`;
         document.body.appendChild(this.floatingBtn);
 
-        const updateBtn = () => {
-            let sel = "";
-            this.savedEditorRange = null;
-
-            const ctx = resolveActiveContext(this.app);
-            if (ctx.editor) {
-                sel = ctx.editor.getSelection().trim();
-                if (sel) {
-                    this.savedEditorRange = {
-                        from: ctx.editor.getCursor("from"),
-                        to: ctx.editor.getCursor("to"),
-                    };
-                }
-            }
-
-            const domSel = window.getSelection();
-            if (!sel && domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-                sel = domSel.toString().trim();
-            }
-
-            if (!sel) {
-                this.hideFloatingBtn();
-                return;
-            }
-
-            this.activeSelectedText = sel;
-
-            if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-                const range = domSel.getRangeAt(0);
-                const rect = range.getBoundingClientRect();
-                if (rect && rect.width > 0) {
-                    let top = rect.top - 44;
-                    if (top < 12) top = rect.bottom + 10;
-                    let left = rect.left + rect.width / 2 - 40;
-                    left = Math.max(12, Math.min(window.innerWidth - 95, left));
-
-                    if (this.floatingBtn) {
-                        this.floatingBtn.style.top = `${top}px`;
-                        this.floatingBtn.style.left = `${left}px`;
-                        this.floatingBtn.style.display = "inline-flex";
-                    }
-                    return;
-                }
-            }
-
-            this.hideFloatingBtn();
+        const scheduleUpdate = () => {
+            if (this.updatePending) return;
+            this.updatePending = true;
+            requestAnimationFrame(() => {
+                this.updatePending = false;
+                this.updateFloatingButton();
+            });
         };
 
-        this.registerDomEvent(document, "mouseup", () => setTimeout(updateBtn, 80));
-        this.registerDomEvent(document, "touchend", () => setTimeout(updateBtn, 120));
-        this.registerDomEvent(document, "selectionchange", () => setTimeout(updateBtn, 100));
+        this.registerDomEvent(document, "selectionchange", scheduleUpdate);
+        this.registerDomEvent(document, "mouseup", () => setTimeout(scheduleUpdate, 60));
+        this.registerDomEvent(document, "touchend", () => setTimeout(scheduleUpdate, 140));
 
         const triggerAnnotation = (e) => {
             e.preventDefault();
@@ -734,12 +724,72 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
         this.floatingBtn.addEventListener("touchend", triggerAnnotation);
     }
 
+    updateFloatingButton() {
+        let text = "";
+        this.savedEditorRange = null;
+
+        const ctx = resolveActiveContext(this.app);
+        if (ctx.editor) {
+            text = ctx.editor.getSelection().trim();
+            if (text) {
+                this.savedEditorRange = {
+                    from: ctx.editor.getCursor("from"),
+                    to: ctx.editor.getCursor("to"),
+                };
+            }
+        }
+
+        const domSel = window.getSelection();
+        if (!text && domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
+            text = domSel.toString().trim();
+        }
+
+        if (!text || text.length === 0) {
+            this.hideFloatingBtn();
+            return;
+        }
+
+        this.activeSelectedText = text;
+
+        if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
+            const range = domSel.getRangeAt(0);
+            const rect = range.getBoundingClientRect();
+            if (rect && (rect.width > 0 || rect.height > 0)) {
+                const mobile = isMobileDevice();
+                let top = 0;
+                let left = 0;
+
+                if (mobile) {
+                    // MOBILE: Position strictly BELOW selection to avoid iPhone native Copy/Share menu overlap!
+                    top = rect.bottom + 14;
+                    // If near viewport bottom, dock to bottom toolbar position
+                    if (top + 45 > window.innerHeight) {
+                        top = window.innerHeight - 56;
+                    }
+                    left = Math.max(16, Math.min(window.innerWidth - 105, rect.left + rect.width / 2 - 40));
+                } else {
+                    // DESKTOP: Position above selection
+                    top = rect.top - 42;
+                    if (top < 12) top = rect.bottom + 10;
+                    left = Math.max(12, Math.min(window.innerWidth - 95, rect.left + rect.width / 2 - 40));
+                }
+
+                if (this.floatingBtn) {
+                    this.floatingBtn.style.top = `${top}px`;
+                    this.floatingBtn.style.left = `${left}px`;
+                    this.floatingBtn.style.display = "inline-flex";
+                }
+                return;
+            }
+        }
+
+        this.hideFloatingBtn();
+    }
+
     hideFloatingBtn() {
         if (this.floatingBtn) {
             this.floatingBtn.style.display = "none";
         }
-        this.activeSelectedText = "";
-        this.savedEditorRange = null;
     }
 
     registerPluginCommands() {

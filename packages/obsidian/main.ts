@@ -5,7 +5,6 @@ import {
   Editor,
   EditorPosition,
   MarkdownView,
-  MarkdownPostProcessorContext,
   TFile,
 } from "obsidian";
 import {
@@ -42,7 +41,15 @@ function escapeRegExp(str: string): string {
 let activePluginInstance: CriticMarkupPlugin | null = null;
 let lastActionTimestamp = 0;
 
-// Universal context resolver across Desktop & Mobile
+function isMobileDevice(): boolean {
+  return (
+    window.innerWidth <= 768 ||
+    "ontouchstart" in window ||
+    navigator.maxTouchPoints > 0
+  );
+}
+
+// 4-tier context resolver across Desktop & Mobile
 function resolveActiveContext(app: App) {
   let view = app.workspace.getActiveViewOfType(MarkdownView);
 
@@ -71,19 +78,15 @@ function resolveActiveContext(app: App) {
   return { view, file, editor: view?.editor };
 }
 
-// Anti-ghost-click action runner
+// Anti-ghost-click runner for mobile touch
 function safeRunAction(action: () => void) {
   const now = Date.now();
-  if (now - lastActionTimestamp < 380) {
+  if (now - lastActionTimestamp < 350) {
     return;
   }
   lastActionTimestamp = now;
   action();
 }
-
-// =========================================================================
-// Native Independent DOM Modal System (Zero Dependency, 100% Guaranteed Pop)
-// =========================================================================
 
 function closeAllCriticModals() {
   const modals = document.querySelectorAll(".criticflow-modal-overlay");
@@ -91,7 +94,7 @@ function closeAllCriticModals() {
 }
 
 /**
- * 1. 新建划词批注弹窗
+ * 1. 新建划词批注弹窗 (原生独立顶层 DOM，跨端 100% 弹出)
  */
 function openAddAnnotationModal(
   app: App,
@@ -105,7 +108,7 @@ function openAddAnnotationModal(
   overlay.style.cssText = `
     position: fixed;
     top: 0; left: 0; width: 100vw; height: 100vh;
-    background-color: rgba(0, 0, 0, 0.65);
+    background-color: rgba(0, 0, 0, 0.7);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
     z-index: 99999999;
@@ -121,10 +124,10 @@ function openAddAnnotationModal(
   modal.style.cssText = `
     width: 100%;
     max-width: 440px;
-    background-color: #1c1c1f;
-    border: 1px solid rgba(255, 255, 255, 0.18);
+    background-color: #18181b;
+    border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 14px;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.7);
     padding: 18px 20px;
     color: #ffffff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -134,7 +137,7 @@ function openAddAnnotationModal(
     gap: 12px;
   `;
 
-  // Header
+  // Title
   const title = document.createElement("div");
   title.style.cssText = "font-size: 16px; font-weight: 700; color: #f4f4f5; display: flex; align-items: center; gap: 6px;";
   title.innerHTML = `<span>✍️</span><span>添加划词批注</span>`;
@@ -145,7 +148,7 @@ function openAddAnnotationModal(
   quoteBox.style.cssText = `
     padding: 8px 12px;
     border-radius: 8px;
-    background: rgba(234, 179, 8, 0.14);
+    background: rgba(234, 179, 8, 0.15);
     border-left: 3px solid #eab308;
     color: #fef08a;
     font-size: 13px;
@@ -159,7 +162,7 @@ function openAddAnnotationModal(
 
   // Textarea
   const textarea = document.createElement("textarea");
-  textarea.placeholder = "输入批注内容 / 修改建议 (按 ⌘+Enter 插入)...";
+  textarea.placeholder = "输入修改建议或批注内容 (按 ⌘+Enter 插入)...";
   textarea.style.cssText = `
     width: 100%;
     height: 85px;
@@ -176,7 +179,7 @@ function openAddAnnotationModal(
   `;
   modal.appendChild(textarea);
 
-  // Footer Buttons
+  // Buttons
   const footer = document.createElement("div");
   footer.style.cssText = "display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px;";
 
@@ -192,7 +195,10 @@ function openAddAnnotationModal(
     font-weight: 600;
     cursor: pointer;
   `;
-  cancelBtn.onclick = () => overlay.remove();
+  cancelBtn.onclick = () => {
+    overlay.remove();
+    activePluginInstance?.resetSelectionState();
+  };
 
   const submitBtn = document.createElement("button");
   submitBtn.textContent = "✍️ 插入批注";
@@ -238,7 +244,7 @@ function openAddAnnotationModal(
       }
       new Notice("✅ 已插入划词批注！");
     } else if (ctx.file) {
-      // Reading View direct file write
+      // Reading View file update
       try {
         const file = ctx.file;
         const oldContent = await app.vault.read(file);
@@ -254,8 +260,14 @@ function openAddAnnotationModal(
           const newContent = oldContent.replace(pattern, critic);
           await app.vault.modify(file, newContent);
           new Notice("✅ 已在文件中插入批注！");
-          if (ctx.view && (ctx.view as any).previewMode) {
-            (ctx.view as any).previewMode.rerender(true);
+
+          // Force view refresh across mobile/desktop
+          if (ctx.view) {
+            if ((ctx.view as any).leaf?.rebuildView) {
+              (ctx.view as any).leaf.rebuildView();
+            } else if ((ctx.view as any).previewMode?.rerender) {
+              (ctx.view as any).previewMode.rerender(true);
+            }
           }
         } else {
           new Notice("⚠️ 未能在原文中定位选区");
@@ -266,6 +278,7 @@ function openAddAnnotationModal(
     }
 
     overlay.remove();
+    activePluginInstance?.resetSelectionState();
   };
 
   submitBtn.onclick = () => safeRunAction(doSubmit);
@@ -273,14 +286,13 @@ function openAddAnnotationModal(
   footer.appendChild(cancelBtn);
   footer.appendChild(submitBtn);
   modal.appendChild(footer);
-
   overlay.appendChild(modal);
 
-  // Prevent ghost clicks from immediately dismissing modal
   const openTime = Date.now();
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay && Date.now() - openTime > 400) {
       overlay.remove();
+      activePluginInstance?.resetSelectionState();
     }
   });
 
@@ -291,6 +303,7 @@ function openAddAnnotationModal(
     }
     if (e.key === "Escape") {
       overlay.remove();
+      activePluginInstance?.resetSelectionState();
     }
   });
 
@@ -299,7 +312,7 @@ function openAddAnnotationModal(
 }
 
 /**
- * 2. 查看/编辑/删除批注弹窗
+ * 2. 查看/编辑/删除批注详情弹窗
  */
 function openAnnotationManageModal(
   app: App,
@@ -314,7 +327,7 @@ function openAnnotationManageModal(
   overlay.style.cssText = `
     position: fixed;
     top: 0; left: 0; width: 100vw; height: 100vh;
-    background-color: rgba(0, 0, 0, 0.65);
+    background-color: rgba(0, 0, 0, 0.7);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
     z-index: 99999999;
@@ -330,10 +343,10 @@ function openAnnotationManageModal(
   modal.style.cssText = `
     width: 100%;
     max-width: 440px;
-    background-color: #1c1c1f;
-    border: 1px solid rgba(255, 255, 255, 0.18);
+    background-color: #18181b;
+    border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 14px;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.7);
     padding: 18px 20px;
     color: #ffffff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -343,7 +356,7 @@ function openAnnotationManageModal(
     gap: 12px;
   `;
 
-  // Header
+  // Title
   const title = document.createElement("div");
   title.style.cssText = "font-size: 16px; font-weight: 700; color: #f4f4f5; display: flex; align-items: center; gap: 6px;";
   title.innerHTML = `<span>💬</span><span>批注详情</span>`;
@@ -354,7 +367,7 @@ function openAnnotationManageModal(
   quoteBox.style.cssText = `
     padding: 8px 12px;
     border-radius: 8px;
-    background: rgba(234, 179, 8, 0.14);
+    background: rgba(234, 179, 8, 0.15);
     border-left: 3px solid #eab308;
     color: #fef08a;
     font-size: 13px;
@@ -385,7 +398,7 @@ function openAnnotationManageModal(
   `;
   modal.appendChild(textarea);
 
-  // Footer Buttons
+  // Buttons
   const footer = document.createElement("div");
   footer.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-top: 4px; gap: 8px;";
 
@@ -482,8 +495,12 @@ function openAnnotationManageModal(
           if (pattern.test(fullDoc)) {
             const replacement = newCommentOrNull === null ? cleanOrig : `{==${cleanOrig}==}{>>${newCommentOrNull.trim()}<<}`;
             await app.vault.modify(file, fullDoc.replace(pattern, replacement));
-            if (ctx.view && (ctx.view as any).previewMode) {
-              (ctx.view as any).previewMode.rerender(true);
+            if (ctx.view) {
+              if ((ctx.view as any).leaf?.rebuildView) {
+                (ctx.view as any).leaf.rebuildView();
+              } else if ((ctx.view as any).previewMode?.rerender) {
+                (ctx.view as any).previewMode.rerender(true);
+              }
             }
           }
         } catch (err) {
@@ -511,7 +528,6 @@ function openAnnotationManageModal(
   rightGroup.appendChild(saveBtn);
   footer.appendChild(rightGroup);
   modal.appendChild(footer);
-
   overlay.appendChild(modal);
 
   const openTime = Date.now();
@@ -580,29 +596,38 @@ class CriticBadgeWidget extends WidgetType {
 }
 
 // ==========================================
-// 4. Main Plugin Class
+// 4. Main Plugin Class (v1.1.0)
 // ==========================================
 export default class CriticMarkupPlugin extends Plugin {
   settings: CriticMarkupSettings = DEFAULT_SETTINGS;
   private floatingBtn: HTMLElement | null = null;
   private activeSelectedText = "";
   private savedEditorRange: { from: EditorPosition; to: EditorPosition } | null = null;
+  private updatePending = false;
 
   async onload() {
     activePluginInstance = this;
     await this.loadSettings();
 
-    // 1. CM6 Extension for Editing View
+    // 1. CM6 Extension for Live Preview
     this.registerEditorExtension(this.buildEditorExtension());
 
     // 2. Reading View PostProcessor
     this.registerReadingViewProcessor();
 
-    // 3. Floating Toolbar
+    // 3. Floating Toolbar (Dual positioning for Mobile/Desktop)
     this.setupFloatingToolbar();
 
     // 4. Commands
     this.registerPluginCommands();
+  }
+
+  resetSelectionState() {
+    this.activeSelectedText = "";
+    this.savedEditorRange = null;
+    if (this.floatingBtn) {
+      this.floatingBtn.style.display = "none";
+    }
   }
 
   private buildEditorExtension(): Extension {
@@ -646,7 +671,7 @@ export default class CriticMarkupPlugin extends Plugin {
     this.registerMarkdownPostProcessor((element: HTMLElement) => {
       if (!this.settings.foldEnabled) return;
 
-      const blocks = element.querySelectorAll("p, li, h1, h2, h3, h4, h5, h6, blockquote");
+      const blocks = element.querySelectorAll("p, li, h1, h2, h3, h4, h5, h6, blockquote, div.markdown-preview-section");
       const targets: Element[] = blocks.length > 0 ? Array.from(blocks) : [element];
 
       for (const block of targets) {
@@ -656,7 +681,7 @@ export default class CriticMarkupPlugin extends Plugin {
         }
 
         const criticRegex =
-          /\{(?:==|<mark>)([\s\S]*?)(?:==|<\/mark>)\}\{(?:>>|&gt;&gt;)([\s\S]*?)(?:<<|&lt;&lt;)\}/g;
+          /\{(?:==|<mark[^>]*>)([\s\S]*?)(?:==|<\/mark>)\}\{(?:>>|&gt;&gt;)([\s\S]*?)(?:<<|&lt;&lt;)\}/g;
 
         if (criticRegex.test(html)) {
           criticRegex.lastIndex = 0;
@@ -701,57 +726,18 @@ export default class CriticMarkupPlugin extends Plugin {
     this.floatingBtn.innerHTML = `<span style="color:#eab308;font-size:13px;">📝</span><span>批注</span>`;
     document.body.appendChild(this.floatingBtn);
 
-    const updateBtn = () => {
-      let sel = "";
-      this.savedEditorRange = null;
-
-      const ctx = resolveActiveContext(this.app);
-      if (ctx.editor) {
-        sel = ctx.editor.getSelection().trim();
-        if (sel) {
-          this.savedEditorRange = {
-            from: ctx.editor.getCursor("from"),
-            to: ctx.editor.getCursor("to"),
-          };
-        }
-      }
-
-      const domSel = window.getSelection();
-      if (!sel && domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-        sel = domSel.toString().trim();
-      }
-
-      if (!sel) {
-        this.hideFloatingBtn();
-        return;
-      }
-
-      this.activeSelectedText = sel;
-
-      if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-        const range = domSel.getRangeAt(0);
-        const rect = range.getBoundingClientRect();
-        if (rect && rect.width > 0) {
-          let top = rect.top - 44;
-          if (top < 12) top = rect.bottom + 10;
-          let left = rect.left + rect.width / 2 - 40;
-          left = Math.max(12, Math.min(window.innerWidth - 95, left));
-
-          if (this.floatingBtn) {
-            this.floatingBtn.style.top = `${top}px`;
-            this.floatingBtn.style.left = `${left}px`;
-            this.floatingBtn.style.display = "inline-flex";
-          }
-          return;
-        }
-      }
-
-      this.hideFloatingBtn();
+    const scheduleUpdate = () => {
+      if (this.updatePending) return;
+      this.updatePending = true;
+      requestAnimationFrame(() => {
+        this.updatePending = false;
+        this.updateFloatingButton();
+      });
     };
 
-    this.registerDomEvent(document, "mouseup", () => setTimeout(updateBtn, 80));
-    this.registerDomEvent(document, "touchend", () => setTimeout(updateBtn, 120));
-    this.registerDomEvent(document, "selectionchange", () => setTimeout(updateBtn, 100));
+    this.registerDomEvent(document, "selectionchange", scheduleUpdate);
+    this.registerDomEvent(document, "mouseup", () => setTimeout(scheduleUpdate, 60));
+    this.registerDomEvent(document, "touchend", () => setTimeout(scheduleUpdate, 140));
 
     const triggerAnnotation = (e: Event) => {
       e.preventDefault();
@@ -775,12 +761,72 @@ export default class CriticMarkupPlugin extends Plugin {
     this.floatingBtn.addEventListener("touchend", triggerAnnotation);
   }
 
+  private updateFloatingButton() {
+    let text = "";
+    this.savedEditorRange = null;
+
+    const ctx = resolveActiveContext(this.app);
+    if (ctx.editor) {
+      text = ctx.editor.getSelection().trim();
+      if (text) {
+        this.savedEditorRange = {
+          from: ctx.editor.getCursor("from"),
+          to: ctx.editor.getCursor("to"),
+        };
+      }
+    }
+
+    const domSel = window.getSelection();
+    if (!text && domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
+      text = domSel.toString().trim();
+    }
+
+    if (!text || text.length === 0) {
+      this.hideFloatingBtn();
+      return;
+    }
+
+    this.activeSelectedText = text;
+
+    if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
+      const range = domSel.getRangeAt(0);
+      const rect = range.getBoundingClientRect();
+      if (rect && (rect.width > 0 || rect.height > 0)) {
+        const mobile = isMobileDevice();
+        let top = 0;
+        let left = 0;
+
+        if (mobile) {
+          // MOBILE: Position strictly BELOW selection to avoid iPhone native Copy/Share menu overlap!
+          top = rect.bottom + 14;
+          // If near viewport bottom, dock to bottom toolbar position
+          if (top + 45 > window.innerHeight) {
+            top = window.innerHeight - 56;
+          }
+          left = Math.max(16, Math.min(window.innerWidth - 105, rect.left + rect.width / 2 - 40));
+        } else {
+          // DESKTOP: Position above selection
+          top = rect.top - 42;
+          if (top < 12) top = rect.bottom + 10;
+          left = Math.max(12, Math.min(window.innerWidth - 95, rect.left + rect.width / 2 - 40));
+        }
+
+        if (this.floatingBtn) {
+          this.floatingBtn.style.top = `${top}px`;
+          this.floatingBtn.style.left = `${left}px`;
+          this.floatingBtn.style.display = "inline-flex";
+        }
+        return;
+      }
+    }
+
+    this.hideFloatingBtn();
+  }
+
   private hideFloatingBtn() {
     if (this.floatingBtn) {
       this.floatingBtn.style.display = "none";
     }
-    this.activeSelectedText = "";
-    this.savedEditorRange = null;
   }
 
   private registerPluginCommands() {
