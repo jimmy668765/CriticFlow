@@ -2,9 +2,11 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const obsidian_1 = require("obsidian");
 const view_1 = require("@codemirror/view");
+
 const DEFAULT_SETTINGS = {
     foldEnabled: true,
 };
+
 function escapeHtml(str) {
     return String(str)
         .replace(/&/g, "&amp;")
@@ -13,11 +15,16 @@ function escapeHtml(str) {
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
 }
+
 function escapeRegExp(str) {
     return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-// Global reference to active plugin instance for widgets/modals
+
 let activePluginInstance = null;
+
+// ==========================================
+// 1. CodeMirror 6 Visual Widget (编辑视图)
+// ==========================================
 class CriticBadgeWidget extends view_1.WidgetType {
     constructor(original, comment) {
         super();
@@ -32,33 +39,46 @@ class CriticBadgeWidget extends view_1.WidgetType {
         badge.className = "cm-critic-badge";
         badge.innerHTML = `💬 <span>${escapeHtml(this.comment)}</span>`;
         badge.title = `批注：${this.comment} (点击查看或删除)`;
+
         const handleOpen = (e) => {
             e.stopPropagation();
             e.preventDefault();
             if (activePluginInstance) {
-                new AnnotationManageModal(activePluginInstance.app, view, this.original, this.comment).open();
+                new AnnotationManageModal(
+                    activePluginInstance.app,
+                    { type: "cm-view", view },
+                    this.original,
+                    this.comment
+                ).open();
             }
         };
+
         badge.addEventListener("click", handleOpen);
         badge.addEventListener("touchend", handleOpen);
         badge.addEventListener("pointerup", handleOpen);
+
         return badge;
     }
     ignoreEvent(e) {
-        return (e.type === "click" ||
+        return (
+            e.type === "click" ||
             e.type === "mousedown" ||
             e.type === "mouseup" ||
             e.type === "touchstart" ||
             e.type === "touchend" ||
             e.type === "pointerdown" ||
-            e.type === "pointerup");
+            e.type === "pointerup"
+        );
     }
 }
-// Annotation Input Modal (新增批注)
+
+// ==========================================
+// 2. Add Annotation Modal (添加批注弹窗)
+// ==========================================
 class AddAnnotationModal extends obsidian_1.Modal {
-    constructor(app, editor, selectedText) {
+    constructor(app, target, selectedText) {
         super(app);
-        this.editor = editor;
+        this.target = target;
         this.selectedText = selectedText;
         this.comment = "";
     }
@@ -66,154 +86,244 @@ class AddAnnotationModal extends obsidian_1.Modal {
         const { contentEl } = this;
         contentEl.empty();
         contentEl.addClass("critic-annotate-modal");
+
         contentEl.createEl("h3", { text: "✍️ 添加划词批注" });
+
         // Quote preview
         const quoteBox = contentEl.createEl("div", {
             cls: "critic-quote-box",
             text: `“${this.selectedText}”`,
         });
-        quoteBox.style.cssText = "padding: 8px 12px; border-radius: 8px; background: rgba(234, 179, 8, 0.12); border-left: 3px solid #eab308; margin-bottom: 12px; font-size: 13px; word-break: break-word;";
+        quoteBox.style.cssText =
+            "padding: 8px 12px; border-radius: 8px; background: rgba(234, 179, 8, 0.12); border-left: 3px solid #eab308; margin-bottom: 12px; font-size: 13px; word-break: break-word;";
+
         // Textarea
         const textarea = contentEl.createEl("textarea");
         textarea.placeholder = "输入修改意见 / 批注内容 (按 ⌘+Enter 插入)...";
-        textarea.style.cssText = "width: 100%; height: 75px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid var(--background-modifier-border); font-size: 14px;";
+        textarea.style.cssText =
+            "width: 100%; height: 80px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px;";
+
         textarea.addEventListener("input", () => {
             this.comment = textarea.value;
         });
+
         textarea.addEventListener("keydown", (e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
                 this.submit();
             }
         });
-        // Buttons
+
+        // Footer buttons
         const footer = contentEl.createEl("div");
-        footer.style.cssText = "display: flex; justify-content: flex-end; gap: 8px;";
+        footer.style.cssText =
+            "display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap;";
+
         const cancelBtn = footer.createEl("button", { text: "取消 (Esc)" });
         cancelBtn.onclick = () => this.close();
-        const submitBtn = footer.createEl("button", { text: "✍️ 插入批注 (⌘↵)", cls: "mod-cta" });
+
+        const submitBtn = footer.createEl("button", {
+            text: "✍️ 插入批注 (⌘↵)",
+            cls: "mod-cta",
+        });
         submitBtn.onclick = () => this.submit();
+
         setTimeout(() => textarea.focus(), 60);
     }
-    submit() {
+    async submit() {
         const text = this.comment.trim();
         if (!text) {
             new obsidian_1.Notice("请输入批注内容");
             return;
         }
-        const critic = `{==${this.selectedText.trim()}==}{>>${text}<<}`;
-        // Robust replacement: handles mobile touch selection collapse on modal blur
-        try {
-            const curSel = this.editor.getSelection();
-            if (curSel && curSel.trim() === this.selectedText.trim()) {
-                this.editor.replaceSelection(critic);
-            }
-            else {
-                const cursor = this.editor.getCursor();
-                const lineText = this.editor.getLine(cursor.line);
-                const idx = lineText.indexOf(this.selectedText.trim());
-                if (idx !== -1) {
-                    this.editor.replaceRange(critic, { line: cursor.line, ch: idx }, { line: cursor.line, ch: idx + this.selectedText.trim().length });
+        const cleanOrig = this.selectedText.trim();
+        const critic = `{==${cleanOrig}==}{>>${text}<<}`;
+
+        if (this.target.type === "editor") {
+            this.target.editor.replaceSelection(critic);
+            new obsidian_1.Notice("✅ 已在文档中插入批注！");
+        } else if (this.target.type === "file") {
+            // Direct Vault file modification for Reading View
+            try {
+                const file = this.target.file;
+                const oldContent = await this.app.vault.read(file);
+                const safeOrig = escapeRegExp(cleanOrig);
+                let pattern = new RegExp(safeOrig);
+
+                if (!pattern.test(oldContent)) {
+                    // Fallback with whitespace flex
+                    const words = cleanOrig.split(/\s+/).map(escapeRegExp).join("\\s+");
+                    pattern = new RegExp(words);
                 }
-                else {
-                    this.editor.replaceSelection(critic);
+
+                if (pattern.test(oldContent)) {
+                    const newContent = oldContent.replace(pattern, critic);
+                    await this.app.vault.modify(file, newContent);
+                    new obsidian_1.Notice("✅ 已在文件中插入批注并落盘！");
+                } else {
+                    new obsidian_1.Notice("⚠️ 未能在原文中定位选区，请尝试在编辑模式下添加");
                 }
+            } catch (err) {
+                console.error("CriticFlow file modification failed:", err);
+                new obsidian_1.Notice("❌ 批注写入失败：" + String(err));
             }
         }
-        catch (err) {
-            this.editor.replaceSelection(critic);
-        }
+
         this.close();
-        this.editor.focus();
-        // Trigger workspace update so CM6 decorator and preview refresh immediately
-        if (activePluginInstance) {
-            activePluginInstance.app.workspace.updateOptions();
-        }
-        new obsidian_1.Notice("✅ 已插入批注！");
     }
     onClose() {
         this.contentEl.empty();
     }
 }
-// Annotation Manage Modal (查看/编辑/删除)
+
+// ==========================================
+// 3. Annotation Manage Modal (查看/编辑/删除)
+// ==========================================
 class AnnotationManageModal extends obsidian_1.Modal {
-    constructor(app, view, originalText, comment) {
+    constructor(app, target, originalText, comment) {
         super(app);
-        this.view = view;
+        this.target = target;
         this.originalText = originalText;
         this.comment = comment;
     }
     onOpen() {
         const { contentEl } = this;
         contentEl.empty();
+
         contentEl.createEl("h3", { text: "💬 批注详情" });
-        // Quote
+
+        // Quote preview
         const quoteBox = contentEl.createEl("div", {
             text: `“${this.originalText}”`,
         });
-        quoteBox.style.cssText = "padding: 8px 12px; border-radius: 8px; background: rgba(234, 179, 8, 0.12); border-left: 3px solid #eab308; margin-bottom: 12px; font-size: 13px; word-break: break-word;";
+        quoteBox.style.cssText =
+            "padding: 8px 12px; border-radius: 8px; background: rgba(234, 179, 8, 0.12); border-left: 3px solid #eab308; margin-bottom: 12px; font-size: 13px; word-break: break-word;";
+
         // Editable comment textarea
         const textarea = contentEl.createEl("textarea");
         textarea.value = this.comment;
-        textarea.style.cssText = "width: 100%; height: 75px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid var(--background-modifier-border); font-size: 14px;";
+        textarea.style.cssText =
+            "width: 100%; height: 80px; padding: 8px; border-radius: 6px; box-sizing: border-box; resize: none; margin-bottom: 12px;";
+
         // Footer
         const footer = contentEl.createEl("div");
-        footer.style.cssText = "display: flex; justify-content: space-between; align-items: center;";
-        const deleteBtn = footer.createEl("button", { text: "🗑️ 删除批注", cls: "mod-warning" });
-        deleteBtn.onclick = () => {
-            this.updateInDoc(null);
+        footer.style.cssText =
+            "display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;";
+
+        const deleteBtn = footer.createEl("button", {
+            text: "🗑️ 删除此批注",
+            cls: "mod-warning",
+        });
+        deleteBtn.onclick = async () => {
+            await this.updateInDoc(null);
             this.close();
             new obsidian_1.Notice("✅ 已删除批注并还原原文！");
         };
+
         const rightGroup = footer.createEl("div");
         rightGroup.style.cssText = "display: flex; gap: 8px;";
+
         const cancelBtn = rightGroup.createEl("button", { text: "取消 (Esc)" });
         cancelBtn.onclick = () => this.close();
-        const saveBtn = rightGroup.createEl("button", { text: "保存修改 (⌘↵)", cls: "mod-cta" });
-        saveBtn.onclick = () => {
+
+        const saveBtn = rightGroup.createEl("button", {
+            text: "保存修改 (⌘↵)",
+            cls: "mod-cta",
+        });
+        saveBtn.onclick = async () => {
             const newComment = textarea.value.trim();
             if (!newComment) {
                 new obsidian_1.Notice("批注内容不能为空");
                 return;
             }
-            this.updateInDoc(newComment);
+            await this.updateInDoc(newComment);
             this.close();
             new obsidian_1.Notice("✅ 批注已修改并保存！");
         };
+
         textarea.addEventListener("keydown", (e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
                 saveBtn.click();
             }
         });
+
         setTimeout(() => textarea.focus(), 60);
     }
-    updateInDoc(newCommentOrNull) {
-        const fullDoc = this.view.state.doc.toString();
-        const safeOrig = escapeRegExp(this.originalText.trim());
-        const safeOldComm = escapeRegExp(this.comment.trim());
-        let pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>\\s*${safeOldComm}\\s*<<\\}`, "g");
-        let match = pattern.exec(fullDoc);
-        if (!match) {
-            pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`, "g");
-            match = pattern.exec(fullDoc);
-        }
-        if (!match) {
-            const words = this.originalText.trim().split(/\s+/).map(escapeRegExp).join("\\s+");
-            pattern = new RegExp(`\\{==\\s*${words}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`, "g");
-            match = pattern.exec(fullDoc);
-        }
-        if (match) {
-            const from = match.index;
-            const to = from + match[0].length;
-            const replacement = newCommentOrNull === null
-                ? this.originalText.trim()
-                : `{==${this.originalText.trim()}==}{>>${newCommentOrNull.trim()}<<}`;
-            this.view.dispatch({
-                changes: { from, to, insert: replacement },
-            });
-            if (activePluginInstance) {
-                activePluginInstance.app.workspace.updateOptions();
+    async updateInDoc(newCommentOrNull) {
+        const cleanOrig = this.originalText.trim();
+        const cleanComm = this.comment.trim();
+
+        if (this.target.type === "cm-view") {
+            const view = this.target.view;
+            const fullDoc = view.state.doc.toString();
+            const safeOrig = escapeRegExp(cleanOrig);
+            const safeOldComm = escapeRegExp(cleanComm);
+
+            let pattern = new RegExp(
+                `\\{==\\s*${safeOrig}\\s*==\\}\\{>>\\s*${safeOldComm}\\s*<<\\}`,
+                "g"
+            );
+            let match = pattern.exec(fullDoc);
+
+            if (!match) {
+                pattern = new RegExp(
+                    `\\{==\\s*${safeOrig}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`,
+                    "g"
+                );
+                match = pattern.exec(fullDoc);
+            }
+
+            if (!match) {
+                const words = cleanOrig.split(/\s+/).map(escapeRegExp).join("\\s+");
+                pattern = new RegExp(`\\{==\\s*${words}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`, "g");
+                match = pattern.exec(fullDoc);
+            }
+
+            if (match) {
+                const from = match.index;
+                const to = from + match[0].length;
+                const replacement =
+                    newCommentOrNull === null
+                        ? cleanOrig
+                        : `{==${cleanOrig}==}{>>${newCommentOrNull.trim()}<<}`;
+
+                view.dispatch({
+                    changes: { from, to, insert: replacement },
+                });
+            }
+        } else if (this.target.type === "file") {
+            try {
+                const file = this.target.file;
+                const fullDoc = await this.app.vault.read(file);
+                const safeOrig = escapeRegExp(cleanOrig);
+                const safeOldComm = escapeRegExp(cleanComm);
+
+                let pattern = new RegExp(
+                    `\\{==\\s*${safeOrig}\\s*==\\}\\{>>\\s*${safeOldComm}\\s*<<\\}`
+                );
+
+                if (!pattern.test(fullDoc)) {
+                    pattern = new RegExp(`\\{==\\s*${safeOrig}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`);
+                }
+
+                if (!pattern.test(fullDoc)) {
+                    const words = cleanOrig.split(/\s+/).map(escapeRegExp).join("\\s+");
+                    pattern = new RegExp(`\\{==\\s*${words}\\s*==\\}\\{>>[\\s\\S]*?<<\\}`);
+                }
+
+                if (pattern.test(fullDoc)) {
+                    const replacement =
+                        newCommentOrNull === null
+                            ? cleanOrig
+                            : `{==${cleanOrig}==}{>>${newCommentOrNull.trim()}<<}`;
+                    const newDoc = fullDoc.replace(pattern, replacement);
+                    await this.app.vault.modify(file, newDoc);
+                } else {
+                    new obsidian_1.Notice("⚠️ 未能在文档中定位该批注位置");
+                }
+            } catch (err) {
+                console.error("CriticFlow update file failed:", err);
             }
         }
     }
@@ -221,6 +331,10 @@ class AnnotationManageModal extends obsidian_1.Modal {
         this.contentEl.empty();
     }
 }
+
+// ==========================================
+// 4. Main Plugin
+// ==========================================
 class CriticMarkupPlugin extends obsidian_1.Plugin {
     constructor() {
         super(...arguments);
@@ -231,108 +345,299 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
     async onload() {
         activePluginInstance = this;
         await this.loadSettings();
-        // 1. Register CodeMirror 6 Visual Decorator (for Live Preview / Editing View)
+
+        // 1. CodeMirror 6 Visual Decorator for Editing View (Live Preview)
         this.registerEditorExtension(this.buildEditorExtension());
-        // 2. Register Markdown Post Processor (for Reading View)
-        this.registerMarkdownPostProcessor((element) => {
-            if (!this.settings.foldEnabled)
-                return;
-            const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-            let node;
-            const nodesToReplace = [];
-            const regex = /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g;
-            while ((node = walker.nextNode())) {
-                if (node.nodeValue && node.nodeValue.includes("{==") && node.nodeValue.includes("<<}")) {
-                    const parent = node.parentElement;
-                    if (parent && !parent.closest("pre, code")) {
-                        nodesToReplace.push(node);
-                    }
-                }
+
+        // 2. Markdown Post Processor for Reading View (阅读视图)
+        this.registerReadingViewProcessor();
+
+        // 3. Setup Floating Toolbar (Desktop & Mobile Support)
+        this.setupFloatingToolbar();
+
+        // 4. Register Context Menu on Selection (Right Click / Mobile Selection Menu)
+        this.registerContextMenu();
+
+        // 5. Register Commands
+        this.registerPluginCommands();
+    }
+
+    // --------------------------------------------------
+    // A. Editing View (Live Preview) CodeMirror Decorator
+    // --------------------------------------------------
+    buildEditorExtension() {
+        const criticMatcher = new view_1.MatchDecorator({
+            regexp: /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g,
+            decorate: (add, from, to, match) => {
+                if (!this.settings.foldEnabled) return;
+                const orig = match[1];
+                const comm = match[2];
+                const origStart = from + 3;
+                const origEnd = origStart + orig.length;
+
+                // 1. Hide opening {==
+                add(from, origStart, view_1.Decoration.replace({}));
+                // 2. Continuous highlight on original text
+                add(origStart, origEnd, view_1.Decoration.mark({ class: "cm-critic-highlight" }));
+                // 3. Replace ==}{>>comment<<} with golden capsule badge widget
+                add(
+                    origEnd,
+                    to,
+                    view_1.Decoration.replace({
+                        widget: new CriticBadgeWidget(orig, comm),
+                    })
+                );
+            },
+        });
+
+        return view_1.ViewPlugin.define(
+            (view) => ({
+                decorations: criticMatcher.createDeco(view),
+                update(u) {
+                    this.decorations = activePluginInstance?.settings.foldEnabled
+                        ? criticMatcher.updateDeco(u, this.decorations)
+                        : view_1.Decoration.none;
+                },
+            }),
+            {
+                decorations: (v) => v.decorations,
             }
-            nodesToReplace.forEach((textNode) => {
-                const text = textNode.nodeValue || "";
-                if (!regex.test(text))
-                    return;
+        );
+    }
+
+    // --------------------------------------------------
+    // B. Reading View Markdown Post Processor (阅读视图渲染)
+    // --------------------------------------------------
+    registerReadingViewProcessor() {
+        this.registerMarkdownPostProcessor((element, context) => {
+            if (!this.settings.foldEnabled) return;
+
+            const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
+            const textNodes = [];
+            let node;
+            while ((node = walker.nextNode())) {
+                textNodes.push(node);
+            }
+
+            const regex = /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g;
+
+            for (const textNode of textNodes) {
+                const val = textNode.nodeValue;
+                if (!val || !val.includes("{==")) continue;
+
                 regex.lastIndex = 0;
-                const fragment = document.createDocumentFragment();
+                if (!regex.test(val)) continue;
+                regex.lastIndex = 0;
+
+                const frag = document.createDocumentFragment();
                 let lastIndex = 0;
                 let match;
-                while ((match = regex.exec(text)) !== null) {
-                    const before = text.slice(lastIndex, match.index);
-                    if (before)
-                        fragment.appendChild(document.createTextNode(before));
-                    const originalText = match[1];
-                    const comment = match[2];
-                    const mark = document.createElement("mark");
-                    mark.className = "cm-critic-highlight";
-                    mark.textContent = originalText;
-                    const badge = document.createElement("span");
-                    badge.className = "cm-critic-badge";
-                    badge.innerHTML = `💬 <span>${escapeHtml(comment)}</span>`;
-                    badge.title = `批注：${comment}`;
-                    const handleOpen = (e) => {
-                        e.stopPropagation();
-                        new obsidian_1.Notice(`💬 批注：${comment}`);
-                    };
-                    badge.addEventListener("click", handleOpen);
-                    badge.addEventListener("touchend", handleOpen);
-                    mark.appendChild(badge);
-                    fragment.appendChild(mark);
-                    lastIndex = regex.lastIndex;
-                }
-                const remaining = text.slice(lastIndex);
-                if (remaining)
-                    fragment.appendChild(document.createTextNode(remaining));
-                if (textNode.parentNode) {
-                    textNode.parentNode.replaceChild(fragment, textNode);
-                }
-            });
-        });
-        // 3. Setup Floating Toolbar (Touch + Mouse + Selection change)
-        this.setupFloatingToolbar();
-        // 4. Setup Native Editor Menu (Right Click & Mobile Long-Press / Action Menu)
-        this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor) => {
-            let sel = editor.getSelection().trim();
-            if (!sel) {
-                try {
-                    const domSel = window.getSelection();
-                    if (domSel && !domSel.isCollapsed) {
-                        sel = domSel.toString().trim();
+
+                while ((match = regex.exec(val)) !== null) {
+                    const matchStart = match.index;
+                    const matchEnd = match.index + match[0].length;
+                    const origText = match[1];
+                    const commentText = match[2];
+
+                    if (matchStart > lastIndex) {
+                        frag.appendChild(document.createTextNode(val.slice(lastIndex, matchStart)));
                     }
+
+                    // Highlight text span
+                    const hlSpan = document.createElement("span");
+                    hlSpan.className = "cm-critic-highlight";
+                    hlSpan.textContent = origText;
+                    frag.appendChild(hlSpan);
+
+                    // Golden capsule badge span
+                    const badgeSpan = document.createElement("span");
+                    badgeSpan.className = "cm-critic-badge";
+                    badgeSpan.innerHTML = `💬 <span>${escapeHtml(commentText)}</span>`;
+                    badgeSpan.title = `批注：${commentText} (点击查看或删除)`;
+
+                    const handleBadgeClick = (e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
+                        const targetFile = activeView?.file;
+                        if (targetFile) {
+                            new AnnotationManageModal(
+                                this.app,
+                                { type: "file", file: targetFile },
+                                origText,
+                                commentText
+                            ).open();
+                        }
+                    };
+
+                    badgeSpan.addEventListener("click", handleBadgeClick);
+                    badgeSpan.addEventListener("touchend", handleBadgeClick);
+                    frag.appendChild(badgeSpan);
+
+                    lastIndex = matchEnd;
                 }
-                catch { }
+
+                if (lastIndex < val.length) {
+                    frag.appendChild(document.createTextNode(val.slice(lastIndex)));
+                }
+
+                textNode.replaceWith(frag);
             }
-            if (sel) {
-                menu.addItem((item) => {
-                    item
-                        .setTitle("✍️ 添加批注 (CriticFlow)")
-                        .setIcon("message-square")
-                        .onClick(() => {
-                        new AddAnnotationModal(this.app, editor, sel).open();
+        });
+    }
+
+    // --------------------------------------------------
+    // C. Floating Toolbar (Desktop Mouse & Mobile Touch)
+    // --------------------------------------------------
+    setupFloatingToolbar() {
+        this.floatingBtn = document.createElement("div");
+        this.floatingBtn.id = "obsidian-floating-annotate-btn";
+        this.floatingBtn.innerHTML = `<span style="color:#eab308;font-size:13px;">📝</span><span>批注</span>`;
+        document.body.appendChild(this.floatingBtn);
+
+        const updateBtn = () => {
+            const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
+            if (!activeView) {
+                this.hideFloatingBtn();
+                return;
+            }
+
+            // Check both editor selection and DOM selection
+            let sel = "";
+            if (activeView.getMode() === "source" && activeView.editor) {
+                sel = activeView.editor.getSelection().trim();
+            }
+
+            const domSel = window.getSelection();
+            if (!sel && domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
+                sel = domSel.toString().trim();
+            }
+
+            if (!sel) {
+                this.hideFloatingBtn();
+                return;
+            }
+
+            this.activeSelectedText = sel;
+
+            if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
+                const range = domSel.getRangeAt(0);
+                const rect = range.getBoundingClientRect();
+                if (rect && rect.width > 0) {
+                    // Position above selection or adjust for viewport bounds
+                    let top = rect.top - 42;
+                    if (top < 12) top = rect.bottom + 10; // place below if clipped at top
+                    let left = rect.left + rect.width / 2 - 40;
+                    left = Math.max(12, Math.min(window.innerWidth - 95, left));
+
+                    if (this.floatingBtn) {
+                        this.floatingBtn.style.top = `${top}px`;
+                        this.floatingBtn.style.left = `${left}px`;
+                        this.floatingBtn.style.display = "inline-flex";
+                    }
+                    return;
+                }
+            }
+
+            this.hideFloatingBtn();
+        };
+
+        // Desktop events
+        this.registerDomEvent(document, "mouseup", () => setTimeout(updateBtn, 80));
+        this.registerDomEvent(document, "selectionchange", () => setTimeout(updateBtn, 100));
+
+        // Mobile touch events
+        this.registerDomEvent(document, "touchend", () => setTimeout(updateBtn, 120));
+
+        const triggerAnnotation = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
+            if (!activeView || !this.activeSelectedText) {
+                this.hideFloatingBtn();
+                return;
+            }
+
+            const txt = this.activeSelectedText;
+            this.hideFloatingBtn();
+
+            if (activeView.getMode() === "source" && activeView.editor) {
+                new AddAnnotationModal(this.app, { type: "editor", editor: activeView.editor }, txt).open();
+            } else if (activeView.file) {
+                // Reading View
+                new AddAnnotationModal(this.app, { type: "file", file: activeView.file }, txt).open();
+            }
+        };
+
+        this.floatingBtn.addEventListener("mousedown", triggerAnnotation);
+        this.floatingBtn.addEventListener("touchstart", triggerAnnotation);
+    }
+
+    hideFloatingBtn() {
+        if (this.floatingBtn) {
+            this.floatingBtn.style.display = "none";
+        }
+        this.activeSelectedText = "";
+    }
+
+    // --------------------------------------------------
+    // D. Context Menu Integration
+    // --------------------------------------------------
+    registerContextMenu() {
+        this.registerEvent(
+            this.app.workspace.on("editor-menu", (menu, editor, view) => {
+                const sel = editor.getSelection().trim();
+                if (sel) {
+                    menu.addItem((item) => {
+                        item
+                            .setTitle("📝 添加划词批注 (CriticFlow)")
+                            .setIcon("highlighter")
+                            .onClick(() => {
+                                new AddAnnotationModal(this.app, { type: "editor", editor }, sel).open();
+                            });
                     });
-                });
-            }
-        }));
-        // 5. Register Commands
+                }
+            })
+        );
+    }
+
+    // --------------------------------------------------
+    // E. Commands
+    // --------------------------------------------------
+    registerPluginCommands() {
+        // 1. Add Annotation
         this.addCommand({
             id: "criticmarkup-add-annotation",
             name: "添加划词批注 (Add Annotation)",
-            editorCallback: (editor) => {
-                let selection = editor.getSelection().trim();
-                if (!selection) {
-                    try {
-                        const domSel = window.getSelection();
-                        if (domSel && !domSel.isCollapsed) {
-                            selection = domSel.toString().trim();
-                        }
-                    }
-                    catch { }
+            callback: () => {
+                const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
+                if (!activeView) {
+                    new obsidian_1.Notice("请先打开一篇 Markdown 笔记");
+                    return;
                 }
+
+                let selection = "";
+                if (activeView.getMode() === "source" && activeView.editor) {
+                    selection = activeView.editor.getSelection().trim();
+                }
+                if (!selection) {
+                    const domSel = window.getSelection();
+                    if (domSel && !domSel.isCollapsed) {
+                        selection = domSel.toString().trim();
+                    }
+                }
+
                 if (!selection) {
                     new obsidian_1.Notice("请先划选要批注的一段文字");
                     return;
                 }
-                new AddAnnotationModal(this.app, editor, selection).open();
+
+                if (activeView.getMode() === "source" && activeView.editor) {
+                    new AddAnnotationModal(this.app, { type: "editor", editor: activeView.editor }, selection).open();
+                } else if (activeView.file) {
+                    new AddAnnotationModal(this.app, { type: "file", file: activeView.file }, selection).open();
+                }
             },
             hotkeys: [
                 {
@@ -341,26 +646,47 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 },
             ],
         });
+
+        // 2. Extract All Annotations for AI Agent (Dual Mode)
         this.addCommand({
             id: "criticmarkup-extract-annotations",
             name: "一键提取全文档批注为 Agent 指令 (Extract for Agent)",
-            editorCallback: (editor) => {
-                const content = editor.getValue();
+            callback: async () => {
+                const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
+                if (!activeView) {
+                    new obsidian_1.Notice("请先打开一篇 Markdown 笔记");
+                    return;
+                }
+
+                let content = "";
+                if (activeView.getMode() === "source" && activeView.editor) {
+                    content = activeView.editor.getValue();
+                } else if (activeView.file) {
+                    content = await this.app.vault.read(activeView.file);
+                }
+
+                if (!content) {
+                    new obsidian_1.Notice("当前文档为空");
+                    return;
+                }
+
                 const regex = /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}/g;
                 const matches = [];
                 let match;
+
                 while ((match = regex.exec(content)) !== null) {
                     if (match[1] && match[2]) {
                         matches.push({ text: match[1].trim(), comment: match[2].trim() });
-                    }
-                    else if (match[3]) {
+                    } else if (match[3]) {
                         matches.push({ text: "(上下文)", comment: match[3].trim() });
                     }
                 }
+
                 if (matches.length === 0) {
                     new obsidian_1.Notice("ℹ️ 当前文档暂无批注");
                     return;
                 }
+
                 let report = `# 文档审阅与修改要求 (来自批注)\n\n`;
                 report += `本文档共包含 **${matches.length}** 条审阅修改意见：\n\n`;
                 matches.forEach((item, index) => {
@@ -369,9 +695,9 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                     report += `- **修改批注**：${item.comment}\n\n`;
                 });
                 report += `请严格根据上述批注修改对应文件并保存，保持其他无关内容不变。\n`;
-                navigator.clipboard.writeText(report).then(() => {
-                    new obsidian_1.Notice(`✅ 已将全部 ${matches.length} 条批注复制到剪贴板！可以直接发给 AI Agent。`);
-                });
+
+                await navigator.clipboard.writeText(report);
+                new obsidian_1.Notice(`✅ 已将全部 ${matches.length} 条批注复制到剪贴板！可以直接发给 AI Agent。`);
             },
             hotkeys: [
                 {
@@ -380,13 +706,19 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 },
             ],
         });
+
+        // 3. Toggle View Mode
         this.addCommand({
             id: "criticmarkup-toggle-fold",
             name: "切换便签折叠视图 / 源码视图 (Toggle View)",
             callback: () => {
                 this.settings.foldEnabled = !this.settings.foldEnabled;
                 this.saveSettings();
-                new obsidian_1.Notice(this.settings.foldEnabled ? "👁️ 已开启便签折叠预览" : "📝 已切换至纯文本源码视图");
+                new obsidian_1.Notice(
+                    this.settings.foldEnabled
+                        ? "👁️ 已开启便签折叠预览"
+                        : "📝 已切换至纯文本源码视图"
+                );
                 this.app.workspace.updateOptions();
             },
             hotkeys: [
@@ -396,136 +728,8 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
                 },
             ],
         });
-        // 6. Mobile Ribbon Icon
-        this.addRibbonIcon("message-square", "CriticFlow 划词批注", () => {
-            const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
-            if (!activeView || !activeView.editor) {
-                new obsidian_1.Notice("请先打开一篇笔记");
-                return;
-            }
-            let sel = activeView.editor.getSelection().trim();
-            if (!sel) {
-                try {
-                    const domSel = window.getSelection();
-                    if (domSel && !domSel.isCollapsed) {
-                        sel = domSel.toString().trim();
-                    }
-                }
-                catch { }
-            }
-            if (!sel) {
-                new obsidian_1.Notice("请先划选一段文字再点击批注");
-                return;
-            }
-            new AddAnnotationModal(this.app, activeView.editor, sel).open();
-        });
-        console.log("[CriticFlow] Plugin loaded successfully!");
-        new obsidian_1.Notice("⚡️ CriticFlow 划词批注插件已激活！");
     }
-    buildEditorExtension() {
-        const criticMatcher = new view_1.MatchDecorator({
-            regexp: /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g,
-            decorate: (add, from, to, match) => {
-                if (!this.settings.foldEnabled)
-                    return;
-                const orig = match[1];
-                const comm = match[2];
-                const origStart = from + 3;
-                const origEnd = origStart + orig.length;
-                // 1. Hide opening {==
-                add(from, origStart, view_1.Decoration.replace({}));
-                // 2. Continuous highlight on original text
-                add(origStart, origEnd, view_1.Decoration.mark({ class: "cm-critic-highlight" }));
-                // 3. Replace ==}{>>comment<<} with golden capsule widget
-                add(origEnd, to, view_1.Decoration.replace({
-                    widget: new CriticBadgeWidget(orig, comm),
-                }));
-            },
-        });
-        return view_1.ViewPlugin.define((view) => ({
-            decorations: criticMatcher.createDeco(view),
-            update(u) {
-                this.decorations = activePluginInstance?.settings.foldEnabled
-                    ? criticMatcher.updateDeco(u, this.decorations)
-                    : view_1.Decoration.none;
-            },
-        }), {
-            decorations: (v) => v.decorations,
-        });
-    }
-    setupFloatingToolbar() {
-        if (this.floatingBtn)
-            this.floatingBtn.remove();
-        this.floatingBtn = document.createElement("div");
-        this.floatingBtn.id = "obsidian-floating-annotate-btn";
-        this.floatingBtn.innerHTML = `<span style="color:#eab308;font-size:13px;">📝</span><span>批注</span>`;
-        document.body.appendChild(this.floatingBtn);
-        const updateBtn = () => {
-            const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
-            if (!activeView || !activeView.editor) {
-                if (this.floatingBtn)
-                    this.floatingBtn.style.display = "none";
-                return;
-            }
-            let text = activeView.editor.getSelection().trim();
-            let rect = null;
-            try {
-                const domSel = window.getSelection();
-                if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-                    if (!text)
-                        text = domSel.toString().trim();
-                    rect = domSel.getRangeAt(0).getBoundingClientRect();
-                }
-            }
-            catch { }
-            if (!text || text.length === 0) {
-                if (this.floatingBtn)
-                    this.floatingBtn.style.display = "none";
-                this.activeSelectedText = "";
-                return;
-            }
-            this.activeSelectedText = text;
-            if (!rect || (rect.width === 0 && rect.height === 0)) {
-                // Fallback for mobile / touch handles
-                try {
-                    const coords = activeView.editor.coordsAtPos?.(activeView.editor.posToOffset(activeView.editor.getCursor("from")));
-                    if (coords) {
-                        rect = { top: coords.top, left: coords.left, width: 40, height: 20 };
-                    }
-                }
-                catch { }
-            }
-            if (!rect || (rect.width === 0 && rect.height === 0)) {
-                if (this.floatingBtn)
-                    this.floatingBtn.style.display = "none";
-                return;
-            }
-            const top = Math.max(12, rect.top - 42);
-            const left = Math.min(window.innerWidth - 90, Math.max(12, rect.left + (rect.width || 40) / 2 - 36));
-            if (this.floatingBtn) {
-                this.floatingBtn.style.top = `${top}px`;
-                this.floatingBtn.style.left = `${left}px`;
-                this.floatingBtn.style.display = "inline-flex";
-            }
-        };
-        // Both mouse and touch listeners for desktop & mobile
-        this.registerDomEvent(document, "mouseup", () => setTimeout(updateBtn, 60));
-        this.registerDomEvent(document, "touchend", () => setTimeout(updateBtn, 120));
-        this.registerDomEvent(document, "selectionchange", () => setTimeout(updateBtn, 100));
-        const handleTrigger = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const activeView = this.app.workspace.getActiveViewOfType(obsidian_1.MarkdownView);
-            if (activeView && activeView.editor && this.activeSelectedText) {
-                const txt = this.activeSelectedText;
-                if (this.floatingBtn)
-                    this.floatingBtn.style.display = "none";
-                new AddAnnotationModal(this.app, activeView.editor, txt).open();
-            }
-        };
-        this.floatingBtn.addEventListener("mousedown", handleTrigger);
-        this.floatingBtn.addEventListener("touchstart", handleTrigger);
-    }
+
     onunload() {
         activePluginInstance = null;
         if (this.floatingBtn) {
@@ -533,14 +737,16 @@ class CriticMarkupPlugin extends obsidian_1.Plugin {
             this.floatingBtn = null;
         }
     }
+
     async loadSettings() {
         this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     }
+
     async saveSettings() {
         await this.saveData(this.settings);
     }
 }
-exports.default = CriticMarkupPlugin;
 
+exports.default = CriticMarkupPlugin;
 module.exports = CriticMarkupPlugin;
 module.exports.default = CriticMarkupPlugin;
