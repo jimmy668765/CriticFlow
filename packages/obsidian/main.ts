@@ -94,7 +94,7 @@ function closeAllCriticModals() {
 }
 
 /**
- * 1. 新建划词批注弹窗 (原生独立顶层 DOM，跨端 100% 弹出)
+ * 1. 新建划词批注弹窗
  */
 function openAddAnnotationModal(
   app: App,
@@ -108,7 +108,7 @@ function openAddAnnotationModal(
   overlay.style.cssText = `
     position: fixed;
     top: 0; left: 0; width: 100vw; height: 100vh;
-    background-color: rgba(0, 0, 0, 0.7);
+    background-color: rgba(0, 0, 0, 0.75);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
     z-index: 99999999;
@@ -125,10 +125,10 @@ function openAddAnnotationModal(
     width: 100%;
     max-width: 440px;
     background-color: #18181b;
-    border: 1px solid rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.22);
     border-radius: 14px;
-    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.7);
-    padding: 18px 20px;
+    box-shadow: 0 24px 50px rgba(0, 0, 0, 0.8);
+    padding: 20px;
     color: #ffffff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     box-sizing: border-box;
@@ -148,7 +148,7 @@ function openAddAnnotationModal(
   quoteBox.style.cssText = `
     padding: 8px 12px;
     border-radius: 8px;
-    background: rgba(234, 179, 8, 0.15);
+    background: rgba(234, 179, 8, 0.18);
     border-left: 3px solid #eab308;
     color: #fef08a;
     font-size: 13px;
@@ -203,7 +203,7 @@ function openAddAnnotationModal(
   const submitBtn = document.createElement("button");
   submitBtn.textContent = "✍️ 插入批注";
   submitBtn.style.cssText = `
-    padding: 8px 16px;
+    padding: 8px 18px;
     border-radius: 8px;
     background: linear-gradient(135deg, #eab308, #ca8a04);
     border: none;
@@ -224,27 +224,61 @@ function openAddAnnotationModal(
     const critic = `{==${cleanOrig}==}{>>${comment}<<}`;
     const ctx = resolveActiveContext(app);
 
+    // Immediate DOM highlight injection for zero-latency feedback on mobile
+    try {
+      const domSel = window.getSelection();
+      if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
+        const range = domSel.getRangeAt(0);
+        const spanWrapper = document.createElement("span");
+        spanWrapper.className = "cm-critic-wrapper";
+        spanWrapper.innerHTML = `<span class="cm-critic-highlight">${escapeHtml(cleanOrig)}</span><span class="cm-critic-badge" data-orig="${encodeURIComponent(cleanOrig)}" data-comm="${encodeURIComponent(comment)}">💬 <span>${escapeHtml(comment)}</span></span>`;
+        range.deleteContents();
+        range.insertNode(spanWrapper);
+        domSel.removeAllRanges();
+
+        // Bind click/touch on the newly injected badge immediately
+        const badge = spanWrapper.querySelector(".cm-critic-badge");
+        if (badge) {
+          const handleBadgeAction = (e: Event) => {
+            e.stopPropagation();
+            e.preventDefault();
+            safeRunAction(() => {
+              openAnnotationManageModal(app, cleanOrig, comment);
+            });
+          };
+          badge.addEventListener("click", handleBadgeAction);
+          badge.addEventListener("touchend", handleBadgeAction);
+        }
+      }
+    } catch (e) {
+      console.debug("CriticFlow immediate DOM injection fallback:", e);
+    }
+
+    // Persist to underlying document
     if (ctx.view && ctx.view.getMode() === "source" && ctx.editor) {
       const editor = ctx.editor;
       if (savedRange) {
         editor.replaceRange(critic, savedRange.from, savedRange.to);
       } else {
-        const curSel = editor.getSelection().trim();
-        if (curSel === cleanOrig) {
-          editor.replaceSelection(critic);
+        const docVal = editor.getValue();
+        const idx = docVal.indexOf(cleanOrig);
+        if (idx !== -1) {
+          const fromPos = editor.offsetToPos(idx);
+          const toPos = editor.offsetToPos(idx + cleanOrig.length);
+          editor.replaceRange(critic, fromPos, toPos);
         } else {
-          const docVal = editor.getValue();
-          const idx = docVal.indexOf(cleanOrig);
-          if (idx !== -1) {
-            editor.replaceRange(critic, editor.offsetToPos(idx), editor.offsetToPos(idx + cleanOrig.length));
-          } else {
-            editor.replaceSelection(critic);
-          }
+          editor.replaceSelection(critic);
         }
       }
+
+      // Blur to exit Live Preview active-line unfolding so highlight is immediately rendered!
+      try {
+        (editor as any).blur?.();
+      } catch {}
+
       new Notice("✅ 已插入划词批注！");
     } else if (ctx.file) {
-      // Reading View file update
+      // Reading View underlying file update
       try {
         const file = ctx.file;
         const oldContent = await app.vault.read(file);
@@ -262,13 +296,15 @@ function openAddAnnotationModal(
           new Notice("✅ 已在文件中插入批注！");
 
           // Force view refresh across mobile/desktop
-          if (ctx.view) {
-            if ((ctx.view as any).leaf?.rebuildView) {
-              (ctx.view as any).leaf.rebuildView();
-            } else if ((ctx.view as any).previewMode?.rerender) {
-              (ctx.view as any).previewMode.rerender(true);
+          setTimeout(() => {
+            if (ctx.view) {
+              if ((ctx.view as any).leaf?.rebuildView) {
+                (ctx.view as any).leaf.rebuildView();
+              } else if ((ctx.view as any).previewMode?.rerender) {
+                (ctx.view as any).previewMode.rerender(true);
+              }
             }
-          }
+          }, 100);
         } else {
           new Notice("⚠️ 未能在原文中定位选区");
         }
@@ -327,7 +363,7 @@ function openAnnotationManageModal(
   overlay.style.cssText = `
     position: fixed;
     top: 0; left: 0; width: 100vw; height: 100vh;
-    background-color: rgba(0, 0, 0, 0.7);
+    background-color: rgba(0, 0, 0, 0.75);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
     z-index: 99999999;
@@ -344,10 +380,10 @@ function openAnnotationManageModal(
     width: 100%;
     max-width: 440px;
     background-color: #18181b;
-    border: 1px solid rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.22);
     border-radius: 14px;
-    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.7);
-    padding: 18px 20px;
+    box-shadow: 0 24px 50px rgba(0, 0, 0, 0.8);
+    padding: 20px;
     color: #ffffff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     box-sizing: border-box;
@@ -367,7 +403,7 @@ function openAnnotationManageModal(
   quoteBox.style.cssText = `
     padding: 8px 12px;
     border-radius: 8px;
-    background: rgba(234, 179, 8, 0.15);
+    background: rgba(234, 179, 8, 0.18);
     border-left: 3px solid #eab308;
     color: #fef08a;
     font-size: 13px;
@@ -596,7 +632,7 @@ class CriticBadgeWidget extends WidgetType {
 }
 
 // ==========================================
-// 4. Main Plugin Class (v1.1.0)
+// 4. Main Plugin Class (v1.1.2)
 // ==========================================
 export default class CriticMarkupPlugin extends Plugin {
   settings: CriticMarkupSettings = DEFAULT_SETTINGS;
@@ -615,7 +651,7 @@ export default class CriticMarkupPlugin extends Plugin {
     // 2. Reading View PostProcessor
     this.registerReadingViewProcessor();
 
-    // 3. Floating Toolbar (Dual positioning for Mobile/Desktop)
+    // 3. Floating Toolbar (Desktop Floating + Mobile Bottom Dock)
     this.setupFloatingToolbar();
 
     // 4. Commands
@@ -631,8 +667,9 @@ export default class CriticMarkupPlugin extends Plugin {
   }
 
   private buildEditorExtension(): Extension {
+    // Robust single-line critic matcher without range overlapping collisions
     const criticMatcher = new MatchDecorator({
-      regexp: /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g,
+      regexp: /\{==([^=\n]+?)==\}\{>>([^>\n]+?)<<\}/g,
       decorate: (add, from, to, match) => {
         if (!this.settings.foldEnabled) return;
         const orig = match[1];
@@ -723,7 +760,7 @@ export default class CriticMarkupPlugin extends Plugin {
   private setupFloatingToolbar() {
     this.floatingBtn = document.createElement("div");
     this.floatingBtn.id = "obsidian-floating-annotate-btn";
-    this.floatingBtn.innerHTML = `<span style="color:#eab308;font-size:13px;">📝</span><span>批注</span>`;
+    this.floatingBtn.innerHTML = `<span style="color:#eab308;font-size:15px;">✍️</span><span>添加划词批注</span>`;
     document.body.appendChild(this.floatingBtn);
 
     const scheduleUpdate = () => {
@@ -793,27 +830,22 @@ export default class CriticMarkupPlugin extends Plugin {
       const rect = range.getBoundingClientRect();
       if (rect && (rect.width > 0 || rect.height > 0)) {
         const mobile = isMobileDevice();
-        let top = 0;
-        let left = 0;
-
-        if (mobile) {
-          // MOBILE: Position strictly BELOW selection to avoid iPhone native Copy/Share menu overlap!
-          top = rect.bottom + 14;
-          // If near viewport bottom, dock to bottom toolbar position
-          if (top + 45 > window.innerHeight) {
-            top = window.innerHeight - 56;
-          }
-          left = Math.max(16, Math.min(window.innerWidth - 105, rect.left + rect.width / 2 - 40));
-        } else {
-          // DESKTOP: Position above selection
-          top = rect.top - 42;
-          if (top < 12) top = rect.bottom + 10;
-          left = Math.max(12, Math.min(window.innerWidth - 95, rect.left + rect.width / 2 - 40));
-        }
 
         if (this.floatingBtn) {
-          this.floatingBtn.style.top = `${top}px`;
-          this.floatingBtn.style.left = `${left}px`;
+          if (mobile) {
+            // MOBILE: Dock strictly to BOTTOM of viewport (0% Overlap with iOS Copy/Share Callout Menu!)
+            this.floatingBtn.classList.add("is-mobile-dock");
+            this.floatingBtn.style.top = "";
+            this.floatingBtn.style.left = "";
+          } else {
+            // DESKTOP: Traditional cursor-following floating pill
+            this.floatingBtn.classList.remove("is-mobile-dock");
+            let top = rect.top - 42;
+            if (top < 12) top = rect.bottom + 10;
+            let left = Math.max(12, Math.min(window.innerWidth - 95, rect.left + rect.width / 2 - 40));
+            this.floatingBtn.style.top = `${top}px`;
+            this.floatingBtn.style.left = `${left}px`;
+          }
           this.floatingBtn.style.display = "inline-flex";
         }
         return;
