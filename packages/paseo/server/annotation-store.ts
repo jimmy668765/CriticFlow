@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { occurrences, prose, type TextAnchor } from "../shared/text-anchor.ts";
+import { occurrences, projectedOccurrences, prose, type TextAnchor } from "../shared/text-anchor.ts";
 
 export type AnnotationInput = {
   filePath: string;
@@ -85,34 +85,48 @@ export function processAnnotation(input: AnnotationInput, roots: string[], backu
     const needle = action === "annotate" ? text : oldMarkup;
     const comments = [...before.matchAll(/\{>>[\s\S]*?<<\}/g)];
     const inComment = (i: number) => comments.some(m => i >= m.index! && i < m.index! + m[0].length);
-    const candidates = occurrences(before, needle).filter(i => !inComment(i));
-    let index = candidates.length === 1 ? candidates[0] : -1;
+    type Candidate = { from: number; to: number };
+    const exact: Candidate[] = occurrences(before, needle)
+      .filter(i => !inComment(i)).map(from => ({ from, to: from + needle.length }));
+    // Reading-mode DOM returns rendered text, not the Markdown bytes. Keep source
+    // offsets so formatting/soft-line-break differences do not turn a valid unique
+    // selection into "old annotation changed".
+    const projected: Candidate[] = action === "annotate"
+      ? projectedOccurrences(before, text).filter(c => !inComment(c.from))
+      : [];
+    const candidates: Candidate[] = [...new Map([...exact, ...projected].map(c => [c.from, c])).values()];
+    let selected: Candidate | undefined = candidates.length === 1 ? candidates[0] : undefined;
     if (!candidates.length) throw new Error("原文或旧批注已变化；请重新打开文档（未写入）");
     if (input.anchor) {
       const anchor = input.anchor;
       const left = anchor.before.slice(-24), right = anchor.after.slice(0, 24);
-      const contextual = candidates.filter(i => {
-        const prefix = prose(before.slice(0, i));
-        const suffix = prose(before.slice(i + needle.length));
+      const contextual = candidates.filter(c => {
+        const prefix = prose(before.slice(0, c.from));
+        const suffix = prose(before.slice(c.to));
         return (left ? prefix.endsWith(left) : !prefix) && (right ? suffix.startsWith(right) : !suffix);
       });
-      // Identical paragraphs are distinguished by their position in the complete rendered document.
-      // Use the ordinal only when total counts AND the surrounding prose agree.
-      const visible = occurrences(before, text).filter(i => !inComment(i));
+      // Identical text is distinguished by rendered ordinal only when counts agree.
+      const visible = [...new Map<number, Candidate>([
+        ...occurrences(before, text).filter(i => !inComment(i)).map(from => [from, { from, to: from + text.length }] as [number, Candidate]),
+        ...projected.map(candidate => [candidate.from, candidate] as [number, Candidate]),
+      ]).values()].sort((a, b) => a.from - b.from);
       const expected = visible.length === anchor.total ? visible[anchor.occurrence] : undefined;
-      const anchored = contextual.find(i => i + (action === "annotate" ? 0 : 3) === expected);
-      index = anchored ?? (contextual.length === 1 ? contextual[0] : -1);
+      const anchored = expected && contextual.find(c => c.from === expected.from);
+      selected = anchored ?? (contextual.length === 1 ? contextual[0] : selected);
     }
-    if (index < 0) throw new Error("选区位置与当前文件不一致，未写入；请重新打开文档后再批注");
+    if (!selected) throw new Error("选区位置与当前文件不一致，未写入；请重新打开文档后再批注");
+    const index = selected.from;
+    const sourceLength = selected.to - selected.from;
     if (action === "annotate") {
       // Reject an overlap with any existing annotation, including partial selection of its comment.
       for (const match of before.matchAll(/\{==[\s\S]*?==\}\{>>[\s\S]*?<<\}/g)) {
-        if (index < match.index! + match[0].length && index + text.length > match.index!) throw new Error("选区与已有批注重叠，请编辑原批注");
+        if (index < match.index! + match[0].length && selected.to > match.index!) throw new Error("选区与已有批注重叠，请编辑原批注");
       }
     }
-    const replacement = action === "delete" ? text : `{==${text}==}{>>${action === "edit" ? input.newComment!.trim() : comment}<<}`;
+    const original = action === "annotate" ? before.slice(index, selected.to) : text;
+    const replacement = action === "delete" ? original : `{==${original}==}{>>${action === "edit" ? input.newComment!.trim() : comment}<<}`;
     // Slicing, not String.replace: user text containing $&, $', $` is always literal.
-    const after = before.slice(0, index) + replacement + before.slice(index + needle.length);
+    const after = before.slice(0, index) + replacement + before.slice(index + sourceLength);
     if (after !== before) {
       if (backupDir) {
         fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });

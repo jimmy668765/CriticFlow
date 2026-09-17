@@ -1,7 +1,7 @@
 {
   "name": "quote-selection",
   "private": true,
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Quote selected text into Paseo chat composer",
   "scripts": {
     "typecheck": "tsc --noEmit"
