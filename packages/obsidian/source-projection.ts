@@ -65,7 +65,9 @@ export function sourceProjection(source: string) {
     if (!hidden[at]) for (const rendered of value) {
       if (!/[\p{L}\p{N}]/u.test(rendered)) continue;
       text += rendered;
-      for (let i = 0; i < rendered.length; i++) { from.push(at); to.push(at + length); }
+      // One rendered Unicode code point equals one projection position;
+      // never duplicate astral characters by their UTF-16 surrogate length.
+      from.push(at); to.push(at + length);
     }
     at += length;
   }

@@ -189,9 +189,12 @@
 
     if (!text) {
       const domSel = window.getSelection();
-      if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
+      const domRange = domSel && !domSel.isCollapsed && domSel.rangeCount > 0
+        ? domSel.getRangeAt(0) : null;
+      // Never treat selection from a modal, toolbar, or host chrome as document text.
+      if (view?.dom && domRange && view.dom.contains(domRange.startContainer) && view.dom.contains(domRange.endContainer)) {
         text = domSel.toString().trim();
-        rect = domSel.getRangeAt(0).getBoundingClientRect();
+        rect = domRange.getBoundingClientRect();
       }
     }
 
@@ -435,32 +438,28 @@
 
   // Replace selection via CodeMirror 6 EditorView dispatch
   function applyCriticMarkup(text, comment, boundView, boundDoc, boundSelection) {
-    const critic = `{==${text.trim()}==}{>>${comment.trim()}<<}`;
     const view = boundView;
-    if (!view || getEditorView() !== view || view.state.doc !== boundDoc || !boundSelection ||
-        boundDoc.sliceString(boundSelection.from, boundSelection.to).trim() !== text.trim() ||
-        /\{==|==\}|\{>>|<<\}/.test(text + comment)) {
+    if (!view || getEditorView() !== view || view.state.doc !== boundDoc || !boundSelection) {
       showToast("文档或选区已变化，未修改；请重新划选"); return false;
     }
-
-    if (view && view.state && view.state.selection) {
-      try {
-        const raw = boundDoc.sliceString(boundSelection.from, boundSelection.to);
-        const from = boundSelection.from + raw.indexOf(text.trim());
-        if ([...boundDoc.toString().matchAll(/\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g)]
-            .some(m => from < m.index + m[0].length && from + text.trim().length > m.index)) {
-          showToast("选区位于已有批注中，请点击气泡编辑"); return false;
-        }
-        view.dispatch({
-          changes: { from, to: from + text.trim().length, insert: critic },
-          selection: { anchor: from + critic.length },
-        });
-        return true;
-      } catch (err) {
-        console.warn("[MarkEdit Extension] view.dispatch error:", err);
+    try {
+      const raw = boundDoc.sliceString(boundSelection.from, boundSelection.to);
+      if (!raw.trim() || raw.trim() !== text.trim() || /\{==|==\}|\{>>|<<\}/.test(raw + comment)) {
+        showToast("文档或选区已变化，未修改；请重新划选"); return false;
       }
+      const critic = `{==${raw}==}{>>${comment.trim()}<<}`;
+      if ([...boundDoc.toString().matchAll(/\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g)]
+          .some(m => boundSelection.from < m.index + m[0].length && boundSelection.to > m.index)) {
+        showToast("选区位于已有批注中，请点击气泡编辑"); return false;
+      }
+      view.dispatch({
+        changes: { from: boundSelection.from, to: boundSelection.to, insert: critic },
+        selection: { anchor: boundSelection.from + critic.length },
+      });
+      return true;
+    } catch (err) {
+      console.warn("[MarkEdit Extension] view.dispatch error:", err);
     }
-
     showToast("未能修改当前编辑器，批注未写入");
     return false;
   }
@@ -470,28 +469,16 @@
     const view = target?.view;
     if (!view || getEditorView() !== view || view.state.doc !== target.doc) return false;
     if (newCommentOrNull !== null && /\{==|==\}|\{>>|<<\}/.test(newCommentOrNull)) return false;
-
-    const fullDoc = view.state.doc.toString();
-    const safeOrig = escapeRegExp(originalText);
-    const safeOldComm = escapeRegExp(oldComment);
-    const pattern = new RegExp(`\\{==${safeOrig}==\\}\\{>>${safeOldComm}<<\\}`, "g");
-    const matches = [...fullDoc.matchAll(pattern)];
-    const match = matches.find(m => m.index === target.from);
-
-    if (match) {
-      const from = match.index;
-      const to = from + match[0].length;
-      const replacement = newCommentOrNull === null
-        ? originalText
-        : `{==${originalText}==}{>>${newCommentOrNull.trim()}<<}`;
-
-      view.dispatch({
-        changes: { from, to, insert: replacement }
-      });
-
+    const expected = `{==${originalText}==}{>>${oldComment}<<}`;
+    const from = target.from, to = target.to ?? from + expected.length;
+    if (!Number.isInteger(from) || view.state.doc.sliceString(from, to) !== expected) return false;
+    const replacement = newCommentOrNull === null
+      ? originalText
+      : `{==${originalText}==}{>>${newCommentOrNull.trim()}<<}`;
+    try {
+      view.dispatch({ changes: { from, to, insert: replacement } });
       return true;
-    }
-    return false;
+    } catch { return false; }
   }
 
   // 4. Badge Click Modal (查看/编辑/删除已有批注)
@@ -732,8 +719,19 @@
         badge.addEventListener("click", (e) => {
           e.stopPropagation();
           e.preventDefault();
-          const from = view.posAtDOM(badge) - this.original.length - 3;
-          showBadgeManagementModal(this.original, this.comment, { view, from, doc: view.state.doc });
+          const fullDoc = view.state.doc.toString();
+          const expected = `{==${this.original}==}{>>${this.comment}<<}`;
+          let pos = -1;
+          try { pos = view.posAtDOM(badge); } catch {}
+          const matches = [...fullDoc.matchAll(/\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}/g)]
+            .filter(m => m[1] === this.original && m[2] === this.comment)
+            .map(m => ({ from: m.index, to: m.index + m[0].length }));
+          const containing = matches.filter(m => pos >= m.from && pos <= m.to);
+          const estimate = pos - this.original.length - 3;
+          const target = containing.length === 1 ? containing[0]
+            : matches.filter(m => m.from === estimate).length === 1 ? matches.find(m => m.from === estimate) : null;
+          if (!target) { showToast("无法唯一定位此批注，未修改"); return; }
+          showBadgeManagementModal(this.original, this.comment, { view, from: target.from, to: target.to, doc: view.state.doc });
         });
         return badge;
       }
@@ -796,7 +794,8 @@
   // 7. Extract all CriticMarkup annotations to clipboard (⌘ + Shift + E)
   function extractAllAnnotations() {
     const view = getEditorView();
-    const fullText = view && view.state ? view.state.doc.toString() : document.body.innerText || "";
+    if (!view?.state) { showToast("无法读取当前文档的原始内容"); return; }
+    const fullText = view.state.doc.toString();
 
     const regex = /\{==([\s\S]*?)==\}\{>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}/g;
     const matches = [];

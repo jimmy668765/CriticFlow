@@ -110,9 +110,14 @@ export function processAnnotation(input: AnnotationInput, roots: string[], backu
         ...occurrences(before, text).filter(i => !inComment(i)).map(from => [from, { from, to: from + text.length }] as [number, Candidate]),
         ...projected.map(candidate => [candidate.from, candidate] as [number, Candidate]),
       ]).values()].sort((a, b) => a.from - b.from);
-      const expected = visible.length === anchor.total ? visible[anchor.occurrence] : undefined;
+      const countsMatch = visible.length === anchor.total;
+      const expected = countsMatch ? visible[anchor.occurrence] : undefined;
       const anchored = expected && contextual.find(c => c.from === expected.from);
-      selected = anchored ?? (contextual.length === 1 ? contextual[0] : selected);
+      // Once an anchor is supplied, never silently downgrade a changed ordinal
+      // to a merely context-looking duplicate. A unique source match remains safe.
+      if (candidates.length > 1) selected = anchored;
+      // A single exact/projected source span is unambiguous even when the
+      // rendered pane's surrounding prose differs from the source snapshot.
     }
     if (!selected) throw new Error("选区位置与当前文件不一致，未写入；请重新打开文档后再批注");
     const index = selected.from;

@@ -1,6 +1,6 @@
 # MarkEdit CriticMarkup Annotation 扩展
 
-为 **MarkEdit（仅 macOS）** 提供就地批注与 Agent 审阅工作流。v1.2.2 为 GitHub prerelease；本版本未运行测试，未完成 GUI 验收或实机验收。
+为 **MarkEdit（仅 macOS）** 提供就地批注与 Agent 审阅工作流。v1.2.3 为 GitHub prerelease；本版本未运行测试，未完成 GUI 验收或实机验收。
 
 ## 核心能力
 

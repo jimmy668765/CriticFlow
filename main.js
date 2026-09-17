@@ -99,10 +99,8 @@ function sourceProjection(source) {
     if (!hidden[at]) for (const rendered of value) {
       if (!/[\p{L}\p{N}]/u.test(rendered)) continue;
       text += rendered;
-      for (let i = 0; i < rendered.length; i++) {
-        from.push(at);
-        to.push(at + length);
-      }
+      from.push(at);
+      to.push(at + length);
     }
     at += length;
   }
